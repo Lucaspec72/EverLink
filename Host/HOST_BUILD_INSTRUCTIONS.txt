@@ -49,25 +49,12 @@ the Guide button as a normal readable button and supports a much wider
 range of controllers (PlayStation, Switch Pro, generic pads) via SDL's
 community-maintained controller database.
 
-TESTING WITHOUT AN ESP32
--------------------------
-You can test the controller-reading half right now with no hardware:
-  1. Plug in any controller SDL recognizes (most modern controllers,
-     including Xbox, PlayStation, Switch Pro, and many generic pads)
-  2. Click "Rescan" under Controllers
-  3. Select it from the list (shown by its actual device name now, not a
-     generic "XInput slot N" label)
-  4. Watch the visual controller preview - buttons should light up green
-     when pressed, sticks/triggers should move as you use them, including
-     the Guide/Xbox/PS/Home button in the middle of the pad
-
 DEVICE DETECTION (EverLink Relays only)
 ---------------------------------------------------
 The EverLink Relays panel does NOT show every COM port on your system - only
 ones that respond correctly to an identification ping, meaning boards
 actually running EverLink Relay firmware. Unrelated serial devices
-(mice, modems, etc.) simply won't show up at all, so there's no need to
-manually hide anything.
+(mice, modems, etc.) simply won't show up at all.
 
 Rescanning briefly opens and probes each candidate COM port in turn, so it
 can take a moment with several devices connected - this is normal. Ports
@@ -77,111 +64,17 @@ they're already confirmed and can't be opened twice at once.
 Right-click a found device for:
   - Rename... - give it a friendly nickname (e.g. "Player 1"). Nicknames are
     tied to the device's own hardware MAC address (read from the chip itself
-    during the identification ping), NOT its COM port - so a nickname stays
-    attached to the correct physical board even if it later enumerates on a
-    different COM port (e.g. moved to a different USB socket, or plugged
-    into a different PC). Choose "Reset to Default" in the rename dialog to
-    clear a nickname.
+    during the identification ping).
 
 A warning triangle (/!\) next to a device means that specific board's chip
 model has no native USB peripheral (plain ESP32/C3 boards, as opposed to
-S2/S3/P4) - it can still be used for controller-data testing over serial
-right now, but won't be usable later for the actual USB-HID-to-console role
-once that's built. Hover the warning for a tooltip with details.
+S2/S3/P4).
 
 BUTTON REMAPPING
 -----------------
 The panel on the right of the live preview lets you change which physical
 input drives each output sent to the Relay. Defaults to identity mapping
-(A->A, B->B, etc). Each pairing gets its own independent remap profile,
-snapshotted at the moment you click "Pair" - editing the panel afterward
-does not retroactively change already-active pairings. "Reset to Default"
-restores identity mapping in the editor for the NEXT pairing you create.
-
-DEVICE CONSOLE
----------------
-Since Windows only allows one program to hold a COM port open at a time, you
-can't run a separate Arduino Serial Monitor while Host is streaming to that
-same port. Instead, the app itself shows incoming text from the Relay right
-in the Active Pairings section - select a pairing in the table and its
-device's output (its periodic debug summaries) appears live in the Device
-Console panel below.
-
-PAIRING (once you have Relay firmware flashed and connected)
---------------------------------------------------------------
-1. Rescan both panels
-2. (Optional) Adjust button remapping in the panel next to the live preview
-3. Select a controller on the left, a found device on the right
-4. Click "Pair"
-5. Check the Active Pairings table at the bottom - Status should read
-   "Streaming" once both the controller and serial port are active.
-   PacketsSent should be climbing continuously (~250/sec).
-6. Click the pairing's row to see its live device console output below.
-
-PORTABLE / NO-INSTALL BUILD
-------------------------------
-For a distributable version that doesn't require the .NET runtime to be
-installed on the machine running it, publish a self-contained single-file
-build instead of a regular build:
-
-     dotnet publish -c Release
-
-  (The project file already specifies win-x64, self-contained, and
-  single-file settings, so a plain `dotnet publish -c Release` picks all of
-  that up automatically. `dotnet build`/`dotnet run` are unaffected and stay
-  fast for day-to-day development.)
-
-  Output lands in: bin\Release\net8.0-windows\win-x64\publish\
-  The single EverLinkHost.exe in that folder is fully self-contained -
-  copy just that one file anywhere and run it, no installation, no
-  separately-installed .NET runtime required on the target machine.
-
-  Note: this exe will be noticeably larger (tens of MB) than a normal build,
-  since it carries the entire .NET runtime bundled inside it. That's the
-  expected tradeoff for true zero-install portability.
-
-TROUBLESHOOTING
-----------------
-- "SerialPort not found" build error: make sure EverLinkHost.csproj has the
-  System.IO.Ports PackageReference (see the file - should already be there).
-- Pairing fails / "Access denied" on COM port: the port might already be
-  open in another program (e.g. Arduino IDE's Serial Monitor). Close that
-  first, then Rescan and try again.
-- No controllers detected: make sure SDL3.dll is present (see step 3 above)
-  and the controller is plugged in/powered on before you click Rescan.
-- Settings file: device nicknames are saved to a "settings.json" file
-  created next to the compiled exe. Delete it to reset all nicknames.
-
-PROJECT FILES
--------------
-  EverLinkHost.csproj    - project file, NuGet package references, portable
-                            publish settings
-  SdlController.cs       - reads controllers via SDL3 (buttons, sticks,
-                            triggers, including the Guide button)
-  SerialLink.cs           - serial packet encoding, send loop, identification
-                            ping/device discovery, and read-back (device
-                            console) support
-  PairingManager.cs       - tracks active (controller, Relay) pairings
-  RemapProfile.cs         - button/axis remapping model and logic
-  AppSettings.cs          - persisted device nicknames, keyed by MAC
-                             (settings.json)
-  InputDialog.xaml(.cs)   - small reusable text-entry dialog (used for rename)
-  MainWindow.xaml(.cs)    - the UI: controller list, Relay list, visual
-                             preview, remap panel, active pairings table,
-                             device console
-  App.xaml(.cs)           - WPF application entry point, SDL init/shutdown
+(A->A, B->B, etc).
 
 See ../EverLink_Protocol.md for the exact serial packet format Host sends -
 that's the contract Relay firmware needs to match.
-
-FUTURE: IN-APP FLASHING UTILITY
------------------------------------
-Planned but not yet built. Approach decided: the app will shell out to a
-separately-downloaded esptool.exe (official Espressif release) rather than
-bundling/embedding it, since esptool itself is GPL-2.0 licensed - bundling
-its code into our own distributed binary would require relicensing our
-whole project under GPL too. Asking the user to drop the official
-esptool.exe into a known folder (or download it themselves from
-Espressif's release page) keeps our project's license independent while
-still giving a "no separate install, just add one file" experience for
-anyone who wants the flashing feature.
