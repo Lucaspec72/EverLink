@@ -1,4 +1,5 @@
 # EverLink
+<img width="512" height="512" alt="Icon" src="https://github.com/user-attachments/assets/345de6ed-42ea-4864-8a8a-8717a6254282" />
 
 > ⚠️ **VIBECODED SOFTWARE**
 >
