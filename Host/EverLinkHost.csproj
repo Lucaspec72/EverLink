@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>EverLinkHost</AssemblyName>
+    <RootNamespace>EverLinkHost</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- Portable, no-install distribution settings. These only take effect with `dotnet
+         publish` (not `dotnet build`/`dotnet run`, which stay fast for iteration). See
+         BUILD_INSTRUCTIONS.txt for the exact publish command. -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- .NET 8 changed the default: specifying a RuntimeIdentifier no longer implies
+         SelfContained on its own, so this must be set explicitly or `dotnet publish`
+         would produce a framework-dependent build that still needs .NET installed
+         on the target machine - defeating the point of a portable build. -->
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <!-- Bundles the app + runtime into one .exe with no companion files scattered
+         alongside it, closer to a true "just double-click it" experience. -->
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.IO.Ports" Version="8.0.0" />
+    <PackageReference Include="System.Management" Version="8.0.0" />
+    <PackageReference Include="ppy.SDL3-CS" Version="2026.320.0" />
+  </ItemGroup>
+
+</Project>

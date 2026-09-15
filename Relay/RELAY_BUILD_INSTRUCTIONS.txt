@@ -1,0 +1,162 @@
+EVERLINK RELAY - BUILD INSTRUCTIONS
+======================================
+
+WHAT THIS IS
+------------
+The ESP32 firmware half of EverLink. Reads the packet protocol from EverLink
+Host over serial and re-emits it as a real USB Xbox 360/XInput controller,
+so the console sees a genuine gamepad plugged in.
+
+This REQUIRES a native-USB-capable board - an S2, S3, or P4-family ESP32
+(anything with a real USB OTG peripheral, not just a USB-serial bridge
+chip). Plain ESP32 and C3-family boards cannot run this firmware's USB
+output stage; Host's device list already flags this ("USB Output:
+Unsupported") for any board it detects as incapable.
+
+It also responds to an identification ping (see ../EverLink_Protocol.md) so
+Host's device scan can recognize this board as a genuine EverLink Relay
+(rather than just any COM port), read its unique hardware MAC address for
+stable device naming, and check its chip model. This uses the SAME
+firmware binary across every board - no per-device editing needed, since
+both the identity and chip model come from the hardware/SDK itself, not
+from anything written into the code.
+
+REQUIRED LIBRARY
+-----------------
+  ESP32XInput - provides the USB Xbox 360/XInput HID output. Install via
+  Arduino IDE's Library Manager (search "ESP32XInput") or PlatformIO's
+  lib_deps. This firmware calls ESP32XInput.begin(), .setButton(),
+  .setHat(), .setLeftTrigger()/.setRightTrigger(), .setStickLeft()/
+  .setStickRight(), .send(), .pollRumble(), and .ready() - if you're on a
+  fork/version with a different API shape, the calls in EverLinkRelay.ino
+  are the ones that need matching up.
+
+OPTION A: ARDUINO IDE (simplest to start with)
+-------------------------------------------------
+1. Install Arduino IDE (2.x): https://www.arduino.cc/en/software
+
+2. Add ESP32 board support:
+   - File > Preferences > "Additional Board Manager URLs" add:
+     https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+   - Tools > Board > Boards Manager > search "esp32" > install
+     "esp32 by Espressif Systems"
+
+3. Install the ESP32XInput library (Library Manager, see above).
+
+4. Open EverLinkRelay.ino in the Arduino IDE
+
+5. Select your board and USB mode:
+   - Tools > Board > ESP32 Arduino > pick your specific S2/S3/P4 board
+   - Tools > USB Mode > "USB-OTG (TinyUSB)" (exact wording varies by
+     board package version) - this is required for native USB HID output;
+     the default "Hardware CDC and JTAG" mode will NOT work here
+   - Tools > Port > select the COM port your board shows up on
+
+6. Click Upload (arrow icon). If it fails to connect:
+   - Hold the BOOT button on the board while upload starts, release once
+     it begins writing (you'll see dots/progress in the output console)
+   - Some S2/S3 boards need the cable plugged into the USB-OTG/native
+     port specifically for upload, not a separate USB-UART port - check
+     your board's silkscreen/documentation if upload doesn't work
+
+7. Once uploaded, open Tools > Serial Monitor, set baud rate to 921600
+   (dropdown in bottom-right of the Serial Monitor window) to match the
+   firmware's BAUD_RATE constant.
+
+OPTION B: PLATFORMIO (CLI-based)
+-------------------------------------
+1. Install PlatformIO Core CLI:
+     pip install platformio
+   (or install the PlatformIO VS Code extension, which includes the CLI)
+
+2. From this folder, initialize a PlatformIO project around the sketch:
+     pio project init --board esp32-s3-devkitc-1
+   (swap the board id for whatever matches your actual S2/S3/P4 board)
+
+   This creates platformio.ini and a src/ folder. Move EverLinkRelay.ino's
+   contents into src/main.cpp (PlatformIO uses .cpp, not .ino, and expects
+   the file at that path - Arduino-style code works fine, just rename it).
+
+3. Add to platformio.ini:
+     lib_deps = <ESP32XInput library reference - package name/URL depends
+                 on where you're pulling it from; PlatformIO Library
+                 Registry search "ESP32XInput" if it's listed there>
+     build_flags = -DARDUINO_USB_MODE=1 -DARDUINO_USB_CDC_ON_BOOT=0
+   (native USB output needs USB-OTG mode enabled at build time, same idea
+   as the Arduino IDE's "USB Mode" menu above)
+
+4. Build:
+     pio run
+
+5. Upload (board must be plugged in):
+     pio run --target upload
+
+   If port isn't auto-detected, specify explicitly:
+     pio run --target upload --upload-port COM5
+
+TESTING
+-------
+1. Flash this sketch to your S2/S3/P4 board (see above)
+2. Run EverLink Host (see ../Host/HOST_BUILD_INSTRUCTIONS.txt)
+3. Rescan, assign a controller to this board in the Configure window
+4. Click the Relay's row in Host's list - its live debug summary
+   (button/stick/trigger state, ok/bad packet counter) appears directly
+   in Host's Device Console panel
+5. On a PC, the board should now also show up as an Xbox 360 Controller
+   in Windows' "Devices and Printers" / Game Controllers once its USB
+   cable is plugged into whatever it's relaying to - check there to
+   confirm the USB output side is actually working end to end (Host's
+   own "USB Output" indicator only reflects whether this board's chip
+   MODEL supports native USB at all, not whether it's live-connected
+   right now - see the note below)
+
+You do NOT need a separate Arduino/PlatformIO serial monitor for step 4 -
+Host's Device Console reads the exact same debug output directly, since
+it already owns the COM port. (Windows only allows one program to hold a
+COM port open at a time, so a separate serial monitor tool couldn't watch
+this firmware's output while Host is also streaming to it anyway - the
+Device Console panel exists specifically to solve that.)
+
+A separate serial monitor is still occasionally useful for one thing: if
+you want to test the identification ping or firmware behavior WITHOUT
+going through Host at all (e.g. while iterating on firmware changes). For
+that, Arduino IDE's or PlatformIO's serial monitor works as normal - just
+make sure Host isn't also holding that port open at the same time.
+
+TROUBLESHOOTING
+----------------
+- Garbled/nonsense output: baud rate mismatch. Confirm Serial Monitor and
+  firmware's BAUD_RATE constant match (921600 by default). If your board's
+  USB-serial bridge chip struggles at 921600, try dropping both the
+  firmware's BAUD_RATE and Host's SerialLink baud rate to 115200 - edit
+  both sides consistently.
+- "bad:" counter climbing steadily: either a baud rate mismatch, a bad/
+  low-quality USB cable, or a genuine wiring issue if you're using a
+  build with exposed UART pins rather than the onboard USB-serial chip.
+- Host's "USB Output" indicator only shows whether this board's chip
+  MODEL supports native USB at all (a fixed fact from its chip model
+  string) - it does NOT reflect whether a console/PC is live-connected
+  to the board's USB port right now. That live state was deliberately
+  removed from Host - the underlying ESP32XInput.ready() signal can't
+  reliably detect a physical unplug for a bus-powered board (see the
+  top comment in EverLinkRelay.ino for why), so a "live" indicator built
+  on it could silently go stale and keep claiming "connected" after the
+  cable was actually pulled. To confirm the USB output is actually
+  working, check the console/PC's own device list (Windows' Game
+  Controllers panel, or your console's controller settings) rather than
+  anything in Host.
+- Upload fails / times out: hold BOOT button during upload start (see
+  Option A step 6). Some boards also need EN/RST pressed briefly after
+  upload to run the new firmware.
+- Board doesn't show up in Host's EverLink Relays panel: confirm the
+  firmware actually finished flashing (check the Arduino IDE/PlatformIO
+  upload output for success), and that no other program (a serial monitor,
+  a previous Host instance) is already holding that COM port open, which
+  would prevent Host's identification ping from reaching the board.
+
+FILES
+-----
+  EverLinkRelay.ino   - the firmware itself (Arduino-style .ino)
+
+See ../EverLink_Protocol.md for the exact packet format this firmware
+parses - must stay in sync with Host/SerialLink.cs on the PC side.

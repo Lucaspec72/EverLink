@@ -1,0 +1,91 @@
+<Window x:Class="EverLinkHost.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="EverLink Host" Height="560" Width="640" MinHeight="360" MinWidth="480"
+        Background="#FF17181A">
+    <Window.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="Theme.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Window.Resources>
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- EverLink Relays: the only top-level list now. Every detected Relay is shown
+             here as soon as it's found - there's no separate "pair" step, no Available/
+             Used split. A Relay's connection to the console starts the moment its serial
+             link opens; controller assignment (via the Configure window) is a later,
+             optional attribute of an already-existing Relay, not a precondition for it to
+             appear here. See RelayManager/RelayConnection for the underlying model. -->
+        <GroupBox Grid.Row="0" Header="EverLink Relays">
+            <DockPanel>
+                <Button DockPanel.Dock="Bottom" Content="Rescan" HorizontalAlignment="Right" Width="90" Margin="4" Click="RescanRelaysButton_Click"/>
+                <Grid>
+                    <ListBox x:Name="RelayListBox" Margin="4">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Margin="2,4">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+
+                                    <!-- Relay name (large) + assigned controller (small,
+                                         underneath, with an activity dot to its left) -
+                                         same visual pattern the old Used relay list used,
+                                         plus the activity indicator. -->
+                                    <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding DeviceLabel}" FontSize="13" Foreground="{StaticResource TextPrimary}"/>
+                                        <StackPanel Orientation="Horizontal" Margin="0,1,0,0">
+                                            <Ellipse Width="6" Height="6" Margin="0,0,5,0" VerticalAlignment="Center">
+                                                <Ellipse.Style>
+                                                    <Style TargetType="Ellipse">
+                                                        <Setter Property="Fill" Value="Transparent"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding ControllerIsActive}" Value="True">
+                                                                <Setter Property="Fill" Value="{StaticResource AccentGreen}"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Ellipse.Style>
+                                            </Ellipse>
+                                            <TextBlock Text="{Binding ControllerLabel}" FontSize="10" Foreground="{StaticResource TextMuted}"/>
+                                        </StackPanel>
+                                    </StackPanel>
+
+                                    <!-- Connection status (top) and USB capability (bottom),
+                                         same size/color as each other - deliberately NOT
+                                         styled like the name/controller pair above, since
+                                         these two lines are peers (both status readouts)
+                                         rather than a primary/secondary label pair. -->
+                                    <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,16,0" HorizontalAlignment="Right">
+                                        <TextBlock Text="{Binding ConnectionStatusLabel}" FontSize="10"
+                                                   Foreground="{Binding ConnectionStatusColor}" HorizontalAlignment="Right"/>
+                                        <TextBlock Text="{Binding UsbCapabilityLabel}" FontSize="10"
+                                                   Foreground="{Binding UsbCapabilityColor}" HorizontalAlignment="Right" Margin="0,1,0,0"/>
+                                    </StackPanel>
+
+                                    <Button Grid.Column="2" Content="Configure" FontSize="10" Padding="8,4" VerticalAlignment="Center"
+                                            Click="OpenConfigureButton_Click"/>
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                        <ListBox.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="Rename..." Click="RenameDevice_Click"/>
+                            </ContextMenu>
+                        </ListBox.ContextMenu>
+                    </ListBox>
+                    <TextBlock x:Name="RelayEmptyText" Text="(none found - plug in an EverLink Relay and rescan)"
+                               Margin="8" TextWrapping="Wrap" Foreground="{StaticResource TextMuted}" FontStyle="Italic"
+                               IsHitTestVisible="False" Visibility="Collapsed"/>
+                </Grid>
+            </DockPanel>
+        </GroupBox>
+    </Grid>
+</Window>

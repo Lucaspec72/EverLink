@@ -1,0 +1,134 @@
+<Window x:Class="EverLinkHost.RelayConfigureWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:EverLinkHost"
+        Title="EverLink - Configure" Height="480" Width="1100" MinHeight="380" MinWidth="800"
+        Background="{DynamicResource BgWindow}">
+    <Window.Resources>
+        <ResourceDictionary Source="Theme.xaml"/>
+    </Window.Resources>
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock x:Name="HeaderText" Grid.Row="0" Text="" Margin="2,0,0,8"
+                   FontWeight="SemiBold" FontSize="14" Foreground="{StaticResource TextPrimary}"/>
+
+        <!-- Top layer: controller selector (left half) + presets (right half), 50/50. -->
+        <Grid Grid.Row="1" Margin="0,0,0,10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Controller selection, Dolphin-style: pick which detected controller feeds
+                 this Relay. Input to this Relay's ESP32 is suspended while this window is
+                 open - see the constructor's SetController(null) and its comment. -->
+            <Border Grid.Column="0" Background="{StaticResource BgControl}" CornerRadius="4" Padding="8" Margin="0,0,5,0">
+                <StackPanel>
+                    <TextBlock Text="Controller" FontSize="10" FontWeight="SemiBold" Foreground="{StaticResource TextMuted}" Margin="0,0,0,4"/>
+                    <ComboBox x:Name="ControllerComboBox" SelectionChanged="ControllerComboBox_SelectionChanged">
+                        <ComboBox.ItemTemplate>
+                            <DataTemplate>
+                                <!-- Activity dot lives INSIDE each dropdown entry (including
+                                     the currently-selected display) rather than as a
+                                     separate element next to the box - that standalone dot
+                                     didn't correspond to anything specific and was removed. -->
+                                <StackPanel Orientation="Horizontal">
+                                    <Ellipse Width="6" Height="6" Margin="0,0,6,0" VerticalAlignment="Center">
+                                        <Ellipse.Style>
+                                            <Style TargetType="Ellipse">
+                                                <Setter Property="Fill" Value="Transparent"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsActive}" Value="True">
+                                                        <Setter Property="Fill" Value="{StaticResource AccentGreen}"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Ellipse.Style>
+                                    </Ellipse>
+                                    <TextBlock Text="{Binding Name, TargetNullValue='(none)'}"/>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                    </ComboBox>
+                </StackPanel>
+            </Border>
+
+            <!-- Presets -->
+            <Border Grid.Column="1" Background="{StaticResource BgControl}" CornerRadius="4" Padding="8" Margin="5,0,0,0">
+                <StackPanel>
+                    <TextBlock Text="Presets" FontSize="10" FontWeight="SemiBold" Foreground="{StaticResource TextMuted}" Margin="0,0,0,4"/>
+                    <ComboBox x:Name="PresetNameComboBox" IsEditable="True" Margin="0,0,0,6"/>
+                    <StackPanel Orientation="Horizontal">
+                        <Button Content="Save" Width="70" Click="SavePresetButton_Click"/>
+                        <Button Content="Load" Width="70" Margin="6,0,0,0" Click="LoadPresetButton_Click"/>
+                        <Button Content="Forget" Width="70" Margin="6,0,0,0" Click="ForgetPresetButton_Click"/>
+                        <Button Content="Reset to Default" Width="110" Margin="6,0,0,0" Click="ResetButton_Click"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Grid>
+
+        <!-- Middle layer: raw input preview (left) + remap grid (middle, widest) +
+             remapped output preview (right). Remap sits directly next to Raw Input so
+             the physical press and the button that's about to catch it are side by side;
+             Remapped Output sits furthest right since it's the "final result" panel, read
+             after the remap grid rather than interrupting the flow between Raw and Remap. -->
+        <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="1*"/>
+                <ColumnDefinition Width="2*"/>
+                <ColumnDefinition Width="1*"/>
+            </Grid.ColumnDefinitions>
+
+            <GroupBox Grid.Column="0" Header="Raw Input" Margin="0,0,5,0">
+                <local:GamepadPreview x:Name="RawPreview" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </GroupBox>
+
+            <!-- Remap grid: every mapping is a "Detect" button rather than a dropdown -
+                 click it, then press the input on the controller; the button's own label
+                 updates to show what it's currently set to, and its border glows the
+                 accent color while a press is actively being held (see
+                 RelayConfigureWindow.xaml.cs's Tick()/UpdateDetectButtonBorders()).
+                 UniformGrid with a fixed column count gives every button an identical
+                 cell size and keeps them aligned on a real grid, rather than a
+                 WrapPanel's left-to-right flow (which let each row's button widths drift
+                 independently based on that row's own content, so columns never lined up
+                 vertically). Wrapped in a ScrollViewer since 24 targets doesn't always
+                 fit the visible height - scrolling here is expected/fine, not a sign the
+                 window is too small. -->
+            <GroupBox Grid.Column="1" Header="Remap (click, then press an input)" Margin="5,0,5,0">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <ItemsControl x:Name="RemapItemsControl">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <UniformGrid x:Name="RemapGrid" Columns="5"/>
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Button x:Name="DetectButton" Margin="3" Padding="6,6" BorderThickness="2"
+                                        Click="DetectButton_Click" Tag="{Binding}">
+                                    <StackPanel>
+                                        <TextBlock Text="{Binding TargetLabel}" FontFamily="Consolas" FontSize="10"
+                                                   Foreground="{StaticResource TextMuted}" HorizontalAlignment="Center"/>
+                                        <TextBlock x:Name="ValueText" Text="{Binding DisplayText}" FontSize="11"
+                                                   Foreground="{StaticResource TextPrimary}" HorizontalAlignment="Center" Margin="0,2,0,0"/>
+                                    </StackPanel>
+                                </Button>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
+            </GroupBox>
+
+            <GroupBox Grid.Column="2" Header="Remapped Output (what the console sees)" Margin="5,0,0,0">
+                <local:GamepadPreview x:Name="RemappedPreview" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </GroupBox>
+        </Grid>
+    </Grid>
+</Window>
