@@ -9,6 +9,7 @@
     <AssemblyName>EverLinkHost</AssemblyName>
     <RootNamespace>EverLinkHost</RootNamespace>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ApplicationIcon>Icon\Icon.ico</ApplicationIcon>
 
     <!-- Portable, no-install distribution settings. These only take effect with `dotnet
          publish` (not `dotnet build`/`dotnet run`, which stay fast for iteration). See
