@@ -15,6 +15,7 @@ public partial class InputDialog : Window
     public InputDialog(string prompt, string currentValue)
     {
         InitializeComponent();
+        WindowChromeHelper.EnableDarkTitleBar(this);
         PromptText.Text = prompt;
         InputTextBox.Text = currentValue;
         InputTextBox.Focus();

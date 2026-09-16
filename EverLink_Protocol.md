@@ -25,13 +25,13 @@ where `<12 hex chars>` is the chip's factory-burned unique MAC address (from
 IAM:EverLink:v1:B0CBD8CCBEF0:ESP32
 ```
 
-The MAC is used as the stable device identity for nicknames and pairing history - NOT the
-COM port name, since COM port assignment can change if a board is moved to a different USB
+The MAC is used as the stable device identity for user-assigned nicknames - NOT the COM
+port name, since COM port assignment can change if a board is moved to a different USB
 port. The chip model is used to warn the user if a specific board lacks the native USB
-peripheral required for the eventual HID/console-facing role (only S2/S3/P4-family chips
-have it - plain ESP32/C3 do not). The same firmware binary is flashed to every board; no
-per-device firmware editing is needed since both the identity and capability info come from
-hardware/SDK calls, not from anything written into the code per-device.
+peripheral required to output as a USB HID gamepad the console can see (only S2/S3/P4-family
+chips have it - plain ESP32/C3 do not). The same firmware binary is flashed to every board;
+no per-device firmware editing is needed since both the identity and capability info come
+from hardware/SDK calls, not from anything written into the code per-device.
 
 Unrelated devices (a mouse dongle, a modem, anything not running EverLink Relay firmware)
 will not recognize `0xFE` as anything meaningful and won't reply with the expected prefix -
@@ -69,9 +69,9 @@ Total: 14 bytes/packet.
 This is EverLink's own bit assignment - not a direct copy of any single input API's native
 layout, though most bit positions happen to line up with XInput's `wButtons` for historical
 reasons (that's what Host originally read controllers through). Host now reads controllers
-via SDL3 instead (see `Host/_archive_xinput/README.md` for why), which is what let this
-protocol add the Guide button (`0x0400`) - XInput could never expose that button to
-applications at all, at the OS level, regardless of what Host's code did.
+via SDL3 instead, which is what let this protocol add the Guide button (`0x0400`) - XInput
+could never expose that button to applications at all, at the OS level, regardless of what
+Host's code did.
 
 ```
 0x0001  DPad Up
@@ -101,12 +101,11 @@ rescales triggers on the way in so this wire format didn't need to change. The b
 are Host's own assignment, decoupled from any specific input API's layout, so future input
 sources can be added without altering the protocol again.
 
-The eventual USB-output half of Relay firmware will unpack this same struct and copy the
-values into a USB HID gamepad report that mimics an Xbox 360 controller's report layout
-(VID 0x045E / PID 0x028E) - an identity confirmed present in `gamecontrollerdb.txt` and
-already known-compatible with the Evercade VS-R's SDL-based input handling. That output
-stage isn't built yet; the current firmware proves out and debugs the Host-to-Relay link
-on its own (see `Relay/EverLinkRelay.ino`).
+The USB-output half of Relay firmware unpacks this same struct and copies the values into
+a USB HID gamepad report that mimics an Xbox 360 controller's report layout (VID 0x045E /
+PID 0x028E) - an identity confirmed present in `gamecontrollerdb.txt` and already
+known-compatible with the Evercade VS-R's SDL-based input handling. See `updateUsbState()`
+in `Relay/EverLink Relay.ino`.
 
 ## Checksum
 
@@ -118,9 +117,9 @@ the packet and resyncs on the next `0xA5` byte it sees.
 ## Rate
 
 Sent every 4ms (~250Hz) from Host. This is deliberately higher than either end can actually
-make use of - USB polling intervals (1-8ms typical) will be the real latency floor on both
-the Host-to-Relay leg and the eventual Relay-to-console leg. The margin just means Host is
-never queuing/waiting; it costs almost nothing at these packet sizes and baud rate.
+make use of - USB polling intervals (1-8ms typical) are the real latency floor on both the
+Host-to-Relay leg and the Relay-to-console leg. The margin just means Host is never
+queuing/waiting; it costs almost nothing at these packet sizes and baud rate.
 
 ## USB status line (Relay -> Host)
 
@@ -129,7 +128,7 @@ dedicated `USB:ready`/`USB:not-ready` line, which Host parsed to drive a live "U
 Ready/Not Connected" status per-Relay. That was removed after confirming the underlying
 signal (`ESP32XInput.ready()`, built on TinyUSB) can't reliably detect a physical unplug
 for a bus-powered board without extra VBUS-sense hardware most boards don't have wired up
-(see `Relay/EverLinkRelay.ino`'s top comment, and
+(see `Relay/EverLink Relay.ino`'s top comment, and
 https://github.com/hathach/tinyusb/issues/2478 / https://github.com/espressif/esp-usb/issues/38
 for the underlying TinyUSB limitation). A status indicator that can silently go stale and
 keep claiming "connected" after the cable's actually been pulled was judged worse than no
@@ -141,10 +140,10 @@ chip model string, not a live connection state. See `Host/MainWindow.xaml.cs`'s
 `UsbCapabilityLabel`.
 
 Firmware's human-readable debug summary (see Rate section above) still includes an
-`USBEnumerated:yes`/`USBEnumerated:no` field from the same underlying
-`ESP32XInput.ready()` call, visible in Host's Device Console like any other debug text -
-but it is not parsed by Host and carries the same "doesn't reliably clear on unplug"
-caveat if you're reading it directly.
+`USBEnumerated:yes`/`USBEnumerated:no` field from the same underlying `ESP32XInput.ready()`
+call, visible to anyone watching the board's serial output directly (e.g. Arduino IDE's
+Serial Monitor) - but it is not parsed or displayed by Host, and carries the same "doesn't
+reliably clear on unplug" caveat if you're reading it directly.
 
 ## Resolved: checksum-failure behavior
 
@@ -152,10 +151,4 @@ Settled as drop-and-hold-last-state (not drop-and-resync-to-zero): on a checksum
 firmware discards the packet and keeps whatever `g_lastState` it last validated, rather than
 zeroing out. This avoids a visible input glitch (e.g. a stick snapping to center) from an
 occasional flipped bit on an otherwise-healthy link. See `tryReadPacket()` in
-`Relay/EverLinkRelay.ino`.
-
-## Open items for when S2/S3/P4 hardware arrives
-
-- Confirm actual achievable serial throughput on the chosen board/UART pins at 921600 baud.
-- Confirm whether the "other" USB port on the S3 board is wired to native USB or a UART bridge
-  chip - determines which physical port this serial link actually needs to be plugged into.
+`Relay/EverLink Relay.ino`.

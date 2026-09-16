@@ -3,12 +3,10 @@ namespace EverLinkHost;
 /// <summary>
 /// A single detected EverLink Relay and everything about how it's currently being used -
 /// its serial link (always open as soon as the Relay is found, connected or not) and
-/// whichever controller (if any) is currently feeding it.
-///
-/// Deliberately NOT called "Pairing" - a Relay isn't paired with anything, it's just a
-/// device that exists, the same way a mouse exists whether or not you're currently moving
-/// it. Controller assignment is one mutable attribute of an existing Relay, not something
-/// that has to happen before the Relay is real.
+/// whichever controller (if any) is currently feeding it. Controller assignment is one
+/// mutable attribute of an existing Relay, not something that has to happen before the
+/// Relay is real - a Relay exists as soon as it's detected, the same way a mouse exists
+/// whether or not you're currently moving it.
 /// </summary>
 public class RelayConnection
 {
@@ -22,10 +20,10 @@ public class RelayConnection
 }
 
 /// <summary>
-/// Tracks every detected EverLink Relay for the lifetime of the app. Unlike the old
-/// PairingManager, a RelayConnection is created the moment a Relay is found (via rescan)
-/// and its serial link opens immediately - controller assignment is a separate, optional,
-/// later step (see SetController), not a precondition for the connection existing.
+/// Tracks every detected EverLink Relay for the lifetime of the app. A RelayConnection is
+/// created the moment a Relay is found (via rescan) and its serial link opens immediately -
+/// controller assignment is a separate, optional, later step (see SetController), not a
+/// precondition for the connection existing.
 /// </summary>
 public class RelayManager
 {

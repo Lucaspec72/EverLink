@@ -15,8 +15,8 @@ public record PortInfo(string PortName, string FriendlyName)
 public record DeviceInfo(string PortName, string FriendlyName, string Mac, string ChipModel)
 {
     /// <summary>Whether this specific chip model has the native USB OTG peripheral needed
-    /// for the eventual USB-HID/console-facing role. Plain ESP32 and C3-family chips lack
-    /// this in hardware - no firmware trick can add it. S2/S3/P4-family chips have it.
+    /// to output as a USB HID gamepad the console can see. Plain ESP32 and C3-family chips
+    /// lack this in hardware - no firmware trick can add it. S2/S3/P4-family chips have it.
     /// This is a static lookup on chip family, not a runtime probe, since USB capability
     /// is fixed per silicon model.</summary>
     public bool IsUsbCapable => ChipModel.Contains("S2", StringComparison.OrdinalIgnoreCase)
@@ -26,9 +26,9 @@ public record DeviceInfo(string PortName, string FriendlyName, string Mac, strin
 
 /// <summary>
 /// The wire protocol shared with EverLink Relay firmware. Keep this in sync with the
-/// firmware's packet parser - see EverLink/PROTOCOL.md for the authoritative, up-to-date
-/// field layout and button bit assignments (not duplicated here, to avoid the two
-/// descriptions drifting out of sync with each other over time).
+/// firmware's packet parser - see EverLink_Protocol.md (repo root) for the authoritative,
+/// up-to-date field layout and button bit assignments (not duplicated here, to avoid the
+/// two descriptions drifting out of sync with each other over time).
 /// </summary>
 public static class PacketProtocol
 {
@@ -70,7 +70,7 @@ public static class PacketProtocol
 
 /// <summary>
 /// Owns one serial connection to one EverLink Relay and streams controller state to it on a timer.
-/// One of these per paired (controller, COM port) combo.
+/// One of these per (controller, COM port) combo currently in use.
 /// </summary>
 public class SerialLink : IDisposable
 {
@@ -106,19 +106,6 @@ public class SerialLink : IDisposable
     private static readonly TimeSpan RelayResponsiveTimeout = TimeSpan.FromSeconds(3);
     public bool IsRelayConfirmedResponsive =>
         LastReceivedFromRelay is { } last && DateTime.UtcNow - last < RelayResponsiveTimeout;
-
-    // Rolling buffer of lines received from the Relay (e.g. its periodic debug
-    // summaries). Capped so it can't grow unbounded over a long session.
-    private readonly LinkedList<string> _receivedLines = new();
-    private const int MaxBufferedLines = 500;
-    private readonly object _logLock = new();
-
-    public event Action<string>? LineReceived;
-
-    public IReadOnlyList<string> GetRecentLines()
-    {
-        lock (_logLock) return _receivedLines.ToList();
-    }
 
     // 250Hz send rate - well above what USB polling on either end can actually use,
     // but cheap and leaves no perceptible input queuing.
@@ -203,33 +190,19 @@ public class SerialLink : IDisposable
         }
     }
 
-    /// <summary>Converts whatever's currently in _rxBuffer into a completed line, records
-    /// it, and clears the buffer for the next one. Called whenever a '\n' byte is seen in
-    /// OnDataReceived - CR bytes are already filtered out before reaching the buffer, so
-    /// no trailing '\r' trimming is needed here.</summary>
+    /// <summary>Marks a completed line's worth of bytes in _rxBuffer as received and clears
+    /// the buffer for the next one. Called whenever a '\n' byte is seen in OnDataReceived.
+    /// Host doesn't currently do anything with the line's actual text (the firmware's
+    /// periodic debug summary, including its "USBEnumerated:yes/no" field - see
+    /// "EverLink Relay.ino" - is meant for a serial monitor, not parsed here); receiving any
+    /// line at all is only used as a liveness signal, to update LastReceivedFromRelay below.
+    /// See MainWindow.UsbCapabilityLabel's doc comment for why Host doesn't try to surface
+    /// USB-enumeration state as a trusted status indicator.</summary>
     private void ProcessCompleteLine()
     {
         if (_rxBuffer.Count == 0) return; // blank line (e.g. a lone \r\n) - nothing to report
-
-        string line = System.Text.Encoding.ASCII.GetString(_rxBuffer.ToArray());
         _rxBuffer.Clear();
-        if (line.Length == 0) return;
-
-        // Note: the firmware's human-readable summary line includes a raw
-        // "USBEnumerated:yes/no" field from ESP32XInput.ready() (see EverLinkRelay.ino) -
-        // it's not parsed out specially here, just shows up in the Device Console like
-        // any other debug line below, for anyone who wants to look at it with the caveat
-        // in mind that it can't be trusted to reflect the console's current physical
-        // connection state. See MainWindow.UsbCapabilityLabel's doc comment for why Host
-        // doesn't try to surface it as a trusted status indicator.
-
-        lock (_logLock)
-        {
-            _receivedLines.AddLast(line);
-            while (_receivedLines.Count > MaxBufferedLines) _receivedLines.RemoveFirst();
-        }
         LastReceivedFromRelay = DateTime.UtcNow;
-        LineReceived?.Invoke(line);
     }
 
     /// <summary>The controller currently assigned to this Relay, or null if none is
@@ -329,7 +302,7 @@ public class SerialLink : IDisposable
         _port.Dispose();
     }
 
-    // Must match the firmware's PING_BYTE / IDENT_PREFIX exactly - see PROTOCOL.md.
+    // Must match the firmware's PING_BYTE / IDENT_PREFIX exactly - see EverLink_Protocol.md.
     private const byte PingByte = 0xFE;
     private const string IdentPrefix = "IAM:EverLink:v1:";
     private const int PingTimeoutMs = 300;
@@ -354,7 +327,7 @@ public class SerialLink : IDisposable
 
         foreach (var portName in SerialPort.GetPortNames())
         {
-            if (skip.Contains(portName)) continue; // already open elsewhere (an active pairing) - can't probe it, and don't need to
+            if (skip.Contains(portName)) continue; // already open elsewhere (an existing Relay connection) - can't probe it, and don't need to
 
             var identity = TryPingDevice(portName);
             if (identity is not null)

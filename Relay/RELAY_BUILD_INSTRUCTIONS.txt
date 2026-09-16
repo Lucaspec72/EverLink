@@ -28,7 +28,7 @@ REQUIRED LIBRARY
   lib_deps. This firmware calls ESP32XInput.begin(), .setButton(),
   .setHat(), .setLeftTrigger()/.setRightTrigger(), .setStickLeft()/
   .setStickRight(), .send(), .pollRumble(), and .ready() - if you're on a
-  fork/version with a different API shape, the calls in EverLinkRelay.ino
+  fork/version with a different API shape, the calls in "EverLink Relay.ino"
   are the ones that need matching up.
 
 OPTION A: ARDUINO IDE (simplest to start with)
@@ -43,7 +43,7 @@ OPTION A: ARDUINO IDE (simplest to start with)
 
 3. Install the ESP32XInput library (Library Manager, see above).
 
-4. Open EverLinkRelay.ino in the Arduino IDE
+4. Open "EverLink Relay.ino" in the Arduino IDE
 
 5. Select your board and USB mode:
    - Tools > Board > ESP32 Arduino > pick your specific S2/S3/P4 board

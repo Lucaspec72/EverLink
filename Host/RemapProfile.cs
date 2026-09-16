@@ -4,7 +4,7 @@ namespace EverLinkHost;
 
 /// <summary>
 /// The logical outputs on the emulated controller we send to the Relay - i.e. the
-/// buttons/axes in the wire protocol (see PROTOCOL.md). Remapping changes which physical
+/// buttons/axes in the wire protocol (see EverLink_Protocol.md). Remapping changes which physical
 /// input drives each of these, applied after reading the real controller and before
 /// encoding the outgoing packet.
 ///
@@ -174,9 +174,9 @@ public class RemapProfile
 
     /// <summary>Same as BuildRows(), but each row writes changes directly back into this
     /// profile's Mapping the instant the user picks a new source - used by RelayConfigureWindow to
-    /// edit a live pairing's profile with immediate effect, rather than requiring an
+    /// edit a live Relay connection's profile with immediate effect, rather than requiring an
     /// explicit "apply" step. Safe to call on a profile that's actively in use by a running
-    /// pairing: SerialLink reads Mapping fresh on every outgoing packet (every ~4ms), so it
+    /// connection: SerialLink reads Mapping fresh on every outgoing packet (every ~4ms), so it
     /// naturally picks up whatever the dictionary currently holds.</summary>
     public List<RemapRow> BuildLiveRows()
     {

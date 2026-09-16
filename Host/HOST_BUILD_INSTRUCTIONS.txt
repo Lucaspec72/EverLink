@@ -58,7 +58,7 @@ actually running EverLink Relay firmware. Unrelated serial devices
 
 Rescanning briefly opens and probes each candidate COM port in turn, so it
 can take a moment with several devices connected - this is normal. Ports
-already in use by an active pairing are skipped (not re-probed) since
+already in use by a connected Relay are skipped (not re-probed) since
 they're already confirmed and can't be opened twice at once.
 
 Right-click a found device for:

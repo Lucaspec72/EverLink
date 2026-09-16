@@ -3,9 +3,9 @@ using SDL;
 namespace EverLinkHost;
 
 /// <summary>
-/// Bit flags for our own outgoing button state, matching PROTOCOL.md's wire layout.
-/// This is OUR bit assignment (not SDL's, not XInput's) - see PROTOCOL.md for the
-/// authoritative list. Guide is the new addition XInput couldn't give us.
+/// Bit flags for our own outgoing button state, matching EverLink_Protocol.md's wire layout.
+/// This is OUR bit assignment (not SDL's, not XInput's) - see EverLink_Protocol.md for the
+/// authoritative list. Guide is the addition XInput could never give us.
 /// </summary>
 [Flags]
 public enum ButtonBits : ushort
@@ -301,11 +301,11 @@ public class SdlControllerReader : IDisposable
         short rx = SDL3.SDL_GetGamepadAxis(gp, SDL_GamepadAxis.SDL_GAMEPAD_AXIS_RIGHTX);
         short ry = SDL3.SDL_GetGamepadAxis(gp, SDL_GamepadAxis.SDL_GAMEPAD_AXIS_RIGHTY);
 
-        // SDL's Y axis convention matches XInput's already (positive = down for SDL... but
-        // our existing preview/remap code assumes XInput's "positive = up" convention from
-        // the old implementation - see MainWindow.xaml.cs PositionStick, which negates Y).
-        // We invert here so downstream code (preview, remap, wire protocol) sees the same
-        // sign convention it always has, keeping this swap contained to one place.
+        // SDL reports positive Y as down; the rest of this app (preview, remap, wire
+        // protocol) uses XInput's convention of positive Y as up - see
+        // GamepadPreview.xaml.cs's PositionStick, which negates Y again to draw the dot in
+        // screen coordinates. We invert here so downstream code sees one consistent sign
+        // convention, keeping this swap contained to one place.
         //
         // Note the InvertAxis helper rather than a plain unary negation: negating
         // short.MinValue (-32768) directly overflows a short (the mathematical result,

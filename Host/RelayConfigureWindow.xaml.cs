@@ -36,6 +36,7 @@ public partial class RelayConfigureWindow : Window
     public RelayConfigureWindow(RelayRow relayRow, MainWindow mainWindow)
     {
         InitializeComponent();
+        WindowChromeHelper.EnableDarkTitleBar(this);
         _relayRow = relayRow;
         _mainWindow = mainWindow;
 

@@ -1,15 +1,13 @@
 using System.ComponentModel;
-using System.Runtime.InteropServices;
 using System.Windows;
-using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
 
 namespace EverLinkHost;
 
-/// <summary>Row shown in the (now standalone) Controller Preview / Configure windows'
-/// controller dropdown. A thin bindable wrapper so pickers can bind to a real object
-/// (name, connection state) instead of raw display strings.</summary>
+/// <summary>Row shown in RelayConfigureWindow's controller-assignment dropdown. A thin
+/// bindable wrapper so the picker can bind to a real object (name, connection state)
+/// instead of raw display strings.</summary>
 public class ControllerRow : INotifyPropertyChanged
 {
     public required uint InstanceId { get; init; }
@@ -107,9 +105,10 @@ public class RelayRow : INotifyPropertyChanged
     /// cable's actually been pulled is worse than no live indicator at all, so it was
     /// removed rather than shipped as something that looks trustworthy but isn't. The
     /// firmware's human-readable debug summary still includes the same underlying
-    /// ESP32XInput.ready() value as a raw "USBEnumerated:yes/no" field (visible in the
-    /// Device Console for anyone who wants to see it with that caveat in mind), but Host
-    /// no longer parses it or surfaces it as a trusted status label.</summary>
+    /// ESP32XInput.ready() value as a raw "USBEnumerated:yes/no" field (visible to anyone
+    /// watching this board's serial output directly, e.g. via a serial monitor, with that
+    /// caveat in mind), but Host no longer parses it or surfaces it as a trusted status
+    /// label.</summary>
     public string UsbCapabilityLabel
     {
         get
@@ -170,7 +169,7 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
 
-        SourceInitialized += (_, _) => TryEnableDarkTitleBar();
+        WindowChromeHelper.EnableDarkTitleBar(this);
 
         // Subscribing before the first PumpEvents() call matters: SDL_INIT_GAMEPAD raises
         // an ADDED event for every gamepad already connected at init time, so this
@@ -453,26 +452,5 @@ public partial class MainWindow : Window
         var configureWindow = new RelayConfigureWindow(row, this) { Owner = this };
         configureWindow.Closed += (_, _) => row.Refresh(); // controller assignment may have changed
         configureWindow.Show();
-    }
-
-    // ---------- Native dark title bar (DWM) ----------
-
-    [DllImport("dwmapi.dll", PreserveSig = true)]
-    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int valueSize);
-
-    private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
-
-    private void TryEnableDarkTitleBar()
-    {
-        try
-        {
-            var hwnd = new WindowInteropHelper(this).Handle;
-            int useDarkMode = 1;
-            DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ref useDarkMode, sizeof(int));
-        }
-        catch
-        {
-            // Cosmetic only - fine to silently no-op on older Windows.
-        }
     }
 }

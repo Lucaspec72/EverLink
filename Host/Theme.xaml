@@ -1,8 +1,8 @@
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                      xmlns:local="clr-namespace:EverLinkHost">
-    <!-- Shared dark theme, used by both MainWindow and SerialConsoleWindow (and any future
-         windows) via <ResourceDictionary.MergedDictionaries> - kept in one place so both
+    <!-- Shared dark theme, used by every window (MainWindow, RelayConfigureWindow,
+         InputDialog) via <ResourceDictionary.MergedDictionaries> - kept in one place so all
          windows stay visually consistent and a palette/style tweak only needs to happen
          once, rather than copy-pasted and drifting between window files. -->
 

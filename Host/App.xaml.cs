@@ -19,7 +19,7 @@ public partial class App : Application
             MessageBox.Show(
                 $"Failed to initialize SDL (controller support):\n\n{ex.Message}\n\n" +
                 "Make sure SDL3.dll is present next to EverLinkHost.exe. " +
-                "See BUILD_INSTRUCTIONS.txt for details.",
+                "See HOST_BUILD_INSTRUCTIONS.txt for details.",
                 "EverLink Host - Startup Error",
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
