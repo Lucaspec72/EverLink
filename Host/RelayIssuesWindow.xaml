@@ -1,0 +1,35 @@
+<Window x:Class="EverLinkHost.RelayIssuesWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Compatibility Issues" Height="220" Width="420" MinHeight="160" MinWidth="320"
+        WindowStartupLocation="CenterOwner" ResizeMode="CanResizeWithGrip"
+        Background="{DynamicResource BgWindow}">
+    <!-- Same shared dark theme merge InputDialog.xaml uses - see its own comment for why
+         this has to be here explicitly rather than assumed inherited. -->
+    <Window.Resources>
+        <ResourceDictionary Source="Theme.xaml"/>
+    </Window.Resources>
+    <DockPanel Margin="12">
+        <!-- Short framing line above the list - this window only ever opens with at least
+             one issue present (see MainWindow.OpenIssuesButton_Click), so this text is
+             never shown over an empty list. -->
+        <TextBlock DockPanel.Dock="Top" Text="This Relay has known compatibility issues:"
+                   Margin="0,0,0,8" TextWrapping="Wrap" Foreground="{StaticResource TextPrimary}"/>
+
+        <Button DockPanel.Dock="Bottom" Content="Close" Width="70" HorizontalAlignment="Right"
+                Margin="0,10,0,0" Click="CloseButton_Click" IsDefault="True" IsCancel="True"/>
+
+        <!-- Each issue is already a complete, plain-language sentence (see
+             DeviceInfo.CompatibilityIssues) - just listed one per line, no extra
+             icon/formatting per item, since the window's own title and framing line above
+             already establish that everything shown here is a warning. -->
+        <ItemsControl x:Name="IssuesList">
+            <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                    <TextBlock Text="{Binding}" TextWrapping="Wrap" Margin="0,0,0,6"
+                               Foreground="{StaticResource TextPrimary}"/>
+                </DataTemplate>
+            </ItemsControl.ItemTemplate>
+        </ItemsControl>
+    </DockPanel>
+</Window>

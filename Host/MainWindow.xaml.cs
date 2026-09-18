@@ -89,43 +89,35 @@ public class RelayRow : INotifyPropertyChanged
         }
     }
 
-    /// <summary>Whether this specific board's chip model supports acting as a real USB
-    /// controller for the console at all (S2/S3/P4-family chips only) - named "USB
-    /// Output" rather than just "USB" since the Host&lt;-&gt;Relay link is ALSO USB
-    /// (serial-over-USB), so plain "USB" would be ambiguous between the two.
+    /// <summary>Known feature-compatibility gaps for this specific Relay - e.g. a v1
+    /// firmware (no rumble support) or a chip model without USB OTG (can't be a wired
+    /// bridge). Sourced from DeviceInfo.CompatibilityIssues, which is the single place
+    /// that decides what counts as an issue and how to word it - see its doc comment for
+    /// why these are worded as informational notes rather than hard errors.
     ///
-    /// Deliberately reports ONLY this fixed hardware fact (from DeviceInfo.IsUsbCapable,
-    /// read off the chip model string during identification) - NOT whether the console
-    /// is live-connected right now. An earlier version also tried to show a live
-    /// ready/not-ready state parsed from the firmware's ESP32XInput.ready(), but that
-    /// turned out to be unreliable: TinyUSB (the underlying USB stack) can't reliably
-    /// detect a physical unplug for a bus-powered board without extra VBUS-sense wiring
-    /// most boards don't have - see https://github.com/hathach/tinyusb/issues/2478. A
-    /// status indicator that can silently go stale and keep claiming "Ready" after the
-    /// cable's actually been pulled is worse than no live indicator at all, so it was
-    /// removed rather than shipped as something that looks trustworthy but isn't. The
-    /// firmware's human-readable debug summary still includes the same underlying
-    /// ESP32XInput.ready() value as a raw "USBEnumerated:yes/no" field (visible to anyone
-    /// watching this board's serial output directly, e.g. via a serial monitor, with that
-    /// caveat in mind), but Host no longer parses it or surfaces it as a trusted status
-    /// label.</summary>
-    public string UsbCapabilityLabel
-    {
-        get
-        {
-            if (!Relay.Link.IsOpen) return "USB Output: Disconnected";
-            return Relay.Device.IsUsbCapable ? "USB Output: Supported" : "USB Output: Unsupported";
-        }
-    }
+    /// This replaces the old always-shown "USB Output: Supported/Unsupported" status line
+    /// that used to sit under the connection status in the main list: that line took up
+    /// space in every row even when there was nothing wrong to report, and only ever
+    /// covered the one USB-capability gap. Folding it into this general-purpose list
+    /// (surfaced via the warning button - see HasCompatibilityIssue and
+    /// RelayIssuesWindow) means a row stays visually uncluttered when nothing's wrong, and
+    /// the same mechanism now covers rumble support too without needing its own separate
+    /// status line added alongside it.
+    ///
+    /// Empty while the link isn't open yet - a Relay that was found but hasn't finished
+    /// its identification exchange doesn't have a confirmed chip model/protocol version to
+    /// report issues about; RelayRow rows aren't created until AddRelay has already run
+    /// the identification ping to completion (see MainWindow.RescanRelaysButton_Click), so
+    /// in practice this is only ever empty for the brief window before that finishes, not
+    /// something the user would see mid-list.</summary>
+    public IReadOnlyList<string> CompatibilityIssues => Relay.Device.CompatibilityIssues;
 
-    public Brush UsbCapabilityColor
-    {
-        get
-        {
-            if (!Relay.Link.IsOpen) return AccentRed;
-            return Relay.Device.IsUsbCapable ? AccentGreen : AccentAmber;
-        }
-    }
+    /// <summary>Whether the warning button should appear at all for this row - see the
+    /// Visibility binding on that button in MainWindow.xaml. A Relay with an empty
+    /// CompatibilityIssues list gets no button, not a disabled one, so the row's layout
+    /// doesn't shift or show a dead control for the common case for everything being
+    /// fine.</summary>
+    public bool HasCompatibilityIssue => CompatibilityIssues.Count > 0;
 
     // Looked up lazily (not as a static field initializer) and loaded from Theme.xaml
     // directly rather than Application.Current.Resources - a static field initializer ran
@@ -179,7 +171,37 @@ public partial class MainWindow : Window
 
         RescanRelaysButton_Click(this, new RoutedEventArgs());
 
-        _activityTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
+        // PERF FIX (smoothness/"jumpy" bug): this timer is the ONLY place
+        // SdlSubsystem.PumpEvents() is called anywhere in Host - see SerialLink.OnTick's
+        // own comment for why it deliberately does NOT call PumpEvents itself (SDL_PumpEvents
+        // must only be called from the thread that ran SDL_Init, which is this UI thread,
+        // via SdlControllerReader's constructor - see EnsureInitialized). SDL only updates
+        // its internal button/axis cache when PumpEvents actually runs (per SDL3's own docs:
+        // "gathers all the pending input information from devices... updates... internal
+        // input device state"); SDL_GetGamepadButton/Axis just read whatever that cache
+        // currently holds, from any thread, without refreshing it.
+        //
+        // SerialLink.OnTick (a separate background System.Threading.Timer, one per Relay)
+        // calls src.Poll() every 4ms to build the outgoing 250Hz packet stream - but every
+        // one of those reads was only ever as fresh as the LAST time this timer's Tick
+        // actually ran. At the previous 50ms interval that's a 20Hz effective input sample
+        // rate feeding a 250Hz send loop: roughly 12 of every 13 outgoing packets were
+        // re-sending an unchanged snapshot, then jumping to the next one once in a while -
+        // which is exactly the "smooth on the real controller, jumps around coming out of
+        // the relay" symptom, not anything in the serial link or firmware (the wire itself
+        // has enormous headroom - a 14-byte packet at 921600 baud takes ~0.15ms to transmit
+        // out of the 4ms budget between packets).
+        //
+        // Dropped to 5ms here to pump far more often. This still runs on the WPF UI
+        // thread/DispatcherTimer (unchanged from before - not moved to a worker thread),
+        // so it doesn't add any new concurrency; each tick is just a pump call plus a cheap
+        // loop reading already-cached SDL values, the same work this timer always did, just
+        // more often. Note WPF's DispatcherTimer can't realistically hit exactly 5ms on
+        // typical Windows timer-resolution hardware (the OS scheduler/multimedia-timer
+        // floor is usually more like 10-15ms) - this gets meaningfully closer to that floor
+        // than the old 50ms did, several times more input freshness, without restructuring
+        // where SDL is pumped from.
+        _activityTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(5) };
         _activityTimer.Tick += (_, _) => { SdlSubsystem.PumpEvents(); UpdateControllerActivityIndicators(); };
         _activityTimer.Start();
 
@@ -452,5 +474,20 @@ public partial class MainWindow : Window
         var configureWindow = new RelayConfigureWindow(row, this) { Owner = this };
         configureWindow.Closed += (_, _) => row.Refresh(); // controller assignment may have changed
         configureWindow.Show();
+    }
+
+    // ---------- Compatibility issues window ----------
+
+    /// <summary>Opens the small popup listing this Relay's known feature-compatibility
+    /// gaps (see RelayRow.CompatibilityIssues) - only reachable at all via the warning
+    /// button, which is itself only visible when there's at least one issue to show (see
+    /// RelayRow.HasCompatibilityIssue), so this handler doesn't need its own "nothing to
+    /// show" fallback path.</summary>
+    private void OpenIssuesButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { DataContext: RelayRow row }) return;
+
+        var issuesWindow = new RelayIssuesWindow(row.CompatibilityIssues) { Owner = this };
+        issuesWindow.ShowDialog();
     }
 }

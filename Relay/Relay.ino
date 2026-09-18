@@ -1,5 +1,5 @@
 /*
-  EverLink Relay - ESP32 Firmware
+  EverLink Relay - ESP32 Firmware (protocol v2)
   ----------------------------------
   Purpose: receives controller input from EverLink Host (the PC app) over a wired serial
   connection and re-emits it as a real USB Xbox 360/XInput controller the console can see
@@ -8,16 +8,28 @@
   they get here.
 
   What it does:
-    - Responds to an identification ping (0xFE) with a confirmation + this chip's unique
-      MAC address and chip model, so EverLink Host can tell genuine Relay devices apart
-      from unrelated COM ports - without needing the board to have been freshly rebooted.
+    - Responds to an identification ping (0xFE) with a confirmation + this firmware's
+      protocol version + this chip's unique MAC address and chip model, so EverLink Host
+      can tell genuine Relay devices apart from unrelated COM ports (without needing the
+      board to have been freshly rebooted) and know which protocol features this specific
+      Relay supports.
     - Reads the 14-byte packet protocol described in EverLink_Protocol.md over Serial
     - Validates the sync byte and XOR checksum, dropping (and holding last-good-state on)
       anything that fails
     - Mirrors the latest valid state onto a real USB Xbox 360 HID report the instant a
       packet arrives, so console-side input latency is just this one hop
+    - Reads back rumble motor levels the console sends to the emulated pad and forwards
+      them to Host as a `RMBL:<left>:<right>` line whenever they change (new in v2 - see
+      EverLink_Protocol.md's "Rumble" section), so Host can play the same rumble on the
+      real physical controller feeding this Relay
     - Every ~250ms, prints a human-readable summary line over Serial for live debugging
       via any serial monitor (Host does not read or display this text)
+
+  Protocol version: this firmware is v2. v1 firmware sends everything above except the
+  rumble line, and its identification reply says "v1" instead of "v2" - Host detects this
+  from the ident reply and stays compatible with a v1 Relay, just without rumble support,
+  surfaced to the user as a compatibility warning rather than a failure. See
+  EverLink_Protocol.md for the exact wire differences.
 
   Why ping-based identification (not a boot-time announcement): a board that's already
   been running for a while (e.g. left plugged in from an earlier session) wouldn't have
@@ -59,10 +71,14 @@
 // ---- Identification protocol ----
 // Host sends this single byte to ask "are you an EverLink Relay?"
 static const uint8_t PING_BYTE = 0xFE;
-// Prefix of our reply - Host checks for this exact prefix before trusting the MAC/model
-// that follows. Chosen to be extremely unlikely to appear as a false positive from an
-// unrelated device that happens to echo random bytes back.
-static const char* IDENT_PREFIX = "IAM:EverLink:v1:";
+// This firmware's protocol version - bumped to 2 for rumble support (see
+// EverLink_Protocol.md's "Rumble" section). Sent as part of the ident reply so Host can
+// tell a v1 Relay (no rumble) from a v2+ one without guessing from behavior.
+static const uint8_t PROTOCOL_VERSION = 2;
+// Prefix of our reply - Host checks for this exact prefix before trusting the version/
+// MAC/model that follows. Chosen to be extremely unlikely to appear as a false positive
+// from an unrelated device that happens to echo random bytes back.
+static const char* IDENT_PREFIX = "IAM:EverLink:v";
 
 // ---- Protocol constants (must match EverLink_Protocol.md and Host/SerialLink.cs exactly) ----
 static const uint8_t SYNC_BYTE = 0xA5;
@@ -118,6 +134,36 @@ static uint32_t g_packetsOk = 0;
 static uint32_t g_packetsBad = 0;
 static uint32_t g_lastSummaryMs = 0;
 
+// Latest rumble motor levels, set by onRumbleReceived() (registered as ESP32XInput's
+// rumble callback in setup() - see below) and read back by sendRumbleIfChanged() in
+// loop(). This firmware previously tried ESP32XInput.getLastRumbleLeft()/
+// getLastRumbleRight() as if pollRumble() populated some queryable "last known state" -
+// that was wrong. The library's actual API (per its own documentation) is
+// callback-based: ESP32XInput.onRumble(callback) registers a function the library calls
+// itself, from inside pollRumble(), whenever the console's rumble command actually
+// changes - there is no separate getter to poll instead. volatile because this is written
+// from the callback (invoked during pollRumble(), itself called from loop()) and read
+// from sendRumbleIfChanged() (also called from loop()) - both on the same thread in this
+// firmware's structure, so volatile here is a defensive habit rather than a strict
+// requirement, but costs nothing and protects against a future change that isn't.
+static volatile uint8_t g_rumbleLeft = 0;
+static volatile uint8_t g_rumbleRight = 0;
+static volatile bool g_rumbleChangedSinceSent = false;
+
+// Registered with ESP32XInput.onRumble() in setup(). Called by the library itself
+// (from within pollRumble(), per its documented "invokes user callbacks on state
+// change" behavior) whenever the console's rumble command changes - NOT called on a
+// timer or every poll, only on an actual change, so g_rumbleChangedSinceSent here plays
+// the same "only send when different" role sendRumbleIfChanged() used to handle itself
+// by comparing against a remembered last-sent value. Keeping that comparison here too
+// (implicitly, by simply always marking changed on every callback invocation) rather
+// than re-deriving it from getters that don't exist in this library.
+void onRumbleReceived(uint8_t left, uint8_t right) {
+  g_rumbleLeft = left;
+  g_rumbleRight = right;
+  g_rumbleChangedSinceSent = true;
+}
+
 // Sends our identification reply, including this chip's factory-burned unique MAC address
 // and its chip model (e.g. "ESP32", "ESP32-S3") so Host can warn if this specific
 // board lacks the native USB peripheral needed for the HID/console-facing role.
@@ -129,10 +175,14 @@ void sendIdentReply() {
   char macStr[13]; // 12 hex chars + null terminator
   snprintf(macStr, sizeof(macStr), "%012llX", mac);
 
-  Serial.print(IDENT_PREFIX);
-  Serial.print(macStr);
-  Serial.print(":");
-  Serial.println(ESP.getChipModel());
+  // Serial.print(PROTOCOL_VERSION) would hit the exact same uint8_t-prints-as-a-raw-byte
+  // trap documented in sendRumbleIfChanged() below - PROTOCOL_VERSION is a uint8_t, so
+  // that call would send the single byte 0x02, not the ASCII character '2', silently
+  // corrupting every ident reply this firmware ever sends (Host's TryPingDevice parses
+  // this field with int.TryParse, which would simply fail on a non-digit byte - the
+  // Relay would never even be recognized as a valid EverLink device). printf's %u forces
+  // decimal-digit output regardless of argument width, same fix applied there.
+  Serial.printf("%s%u:%s:%s\n", IDENT_PREFIX, PROTOCOL_VERSION, macStr, ESP.getChipModel());
 }
 
 // Checks for and handles a pending identification ping. Returns true if one was handled
@@ -247,6 +297,41 @@ void updateUsbState() {
   ESP32XInput.send();
 }
 
+// ---- Rumble reporting (Relay -> Host, v2+) ----
+
+// Reads the rumble motor levels the console has told the emulated pad to play (serviced
+// by ESP32XInput.pollRumble() in loop(), which must run first) and, if either level has
+// changed since the last report, sends a `RMBL:<left>:<right>` line to Host - see
+// EverLink_Protocol.md's "Rumble" section. Cheap enough to call every loop() iteration:
+// this only compares two bytes and does nothing further unless they differ.
+// Forwards the latest rumble state to Host as a `RMBL:<left>:<right>` line - see
+// EverLink_Protocol.md's "Rumble" section. Only sends when onRumbleReceived() has set
+// g_rumbleChangedSinceSent, i.e. only after ESP32XInput's own callback has actually
+// fired with a changed value - this firmware doesn't do its own change-detection
+// against a remembered previous value anymore (there's nothing to poll/compare against
+// between callback firings), it just trusts the library's "callback only fires on
+// change" behavior and forwards whatever the callback most recently reported, once.
+void sendRumbleIfChanged() {
+  if (!g_rumbleChangedSinceSent) return;
+
+  // Snapshot before clearing the flag - onRumbleReceived() could in principle fire again
+  // between these two lines (it's called from pollRumble(), not from an interrupt, so in
+  // this firmware's single-threaded loop() structure it actually can't during this
+  // window - but reading into locals first costs nothing and avoids relying on that).
+  uint8_t left = g_rumbleLeft;
+  uint8_t right = g_rumbleRight;
+  g_rumbleChangedSinceSent = false;
+
+  // IMPORTANT: Serial.print(uint8_t) does NOT print decimal digits - uint8_t overloads
+  // resolve the same as char/byte, so Serial.print(left) would send the raw 8-bit VALUE
+  // as a single byte (e.g. the byte 0xB4 for 180), not the three ASCII characters "1",
+  // "8", "0". printf's %u format specifier forces decimal-digit output regardless of the
+  // argument's underlying width, sidestepping that trap entirely - same fix as
+  // printSummary() already uses for LT/RT (also uint8_t) further down in this file, and
+  // as sendIdentReply() above now also uses for PROTOCOL_VERSION.
+  Serial.printf("RMBL:%u:%u\n", left, right);
+}
+
 // ---- Debug output ----
 
 void appendIfPressed(String &out, uint16_t buttons, uint16_t bit, const char *name) {
@@ -284,12 +369,13 @@ void printSummary() {
   bool everEnumerated = ESP32XInput.ready();
 
   Serial.printf(
-    "[%lums] Btns:%-40s LT:%3u RT:%3u LX:%6d LY:%6d RX:%6d RY:%6d | ok:%lu bad:%lu USBEnumerated:%s\n",
+    "[%lums] Btns:%-40s LT:%3u RT:%3u LX:%6d LY:%6d RX:%6d RY:%6d | ok:%lu bad:%lu USBEnumerated:%s RumbleL:%3u RumbleR:%3u\n",
     millis(), pressed.c_str(),
     g_lastState.leftTrigger, g_lastState.rightTrigger,
     g_lastState.leftX, g_lastState.leftY, g_lastState.rightX, g_lastState.rightY,
     g_packetsOk, g_packetsBad,
-    everEnumerated ? "yes" : "no"
+    everEnumerated ? "yes" : "no",
+    g_rumbleLeft, g_rumbleRight
   );
 }
 
@@ -303,6 +389,16 @@ void setup() {
   ESP32XInput.begin(XINPUT_VID, XINPUT_PID);
   ESP32XInput.setPollInterval(XINPUT_POLL_INTERVAL_MS); // 4ms = 250Hz, matching the EverLink packet rate
   ESP32XInput.releaseAll(); // start from a fully-released controller state, not whatever garbage memory held before
+
+  // Registers onRumbleReceived() as the function ESP32XInput calls whenever the console's
+  // rumble command changes - this is the library's actual rumble API (see
+  // onRumbleReceived's doc comment above for why the previous getLastRumbleLeft()/
+  // getLastRumbleRight()-based approach was wrong). Must be registered before pollRumble()
+  // is ever called in loop() for the very first rumble command to be caught, though in
+  // practice a console typically doesn't send one until well after enumeration, so this
+  // ordering only matters for correctness/clarity, not to avoid a real race in this
+  // firmware's startup sequence.
+  ESP32XInput.onRumble(onRumbleReceived);
 
   Serial.println("USB XInput controller initialized.");
 }
@@ -326,9 +422,18 @@ void loop() {
     updateUsbState();
   }
 
-  // Services pending rumble/LED reports from the console so the USB interface stays
-  // correctly serviced even though Relay doesn't currently act on their contents.
+  // Services pending rumble/LED OUT-endpoint packets from the console, draining and
+  // dispatching them - this is what actually invokes onRumbleReceived() (registered in
+  // setup()) whenever the console's rumble command changes. Nothing is read back from
+  // ESP32XInput after this call; onRumbleReceived() already wrote whatever changed into
+  // g_rumbleLeft/g_rumbleRight/g_rumbleChangedSinceSent as a side effect of this call.
   ESP32XInput.pollRumble();
+
+  // Forward the rumble state to Host, but only if onRumbleReceived() actually set
+  // g_rumbleChangedSinceSent during the pollRumble() call just above (new in v2 - see
+  // EverLink_Protocol.md's "Rumble" section). Must run after pollRumble(): that's the
+  // only place g_rumbleChangedSinceSent ever gets set.
+  sendRumbleIfChanged();
 
   uint32_t now = millis();
   if (now - g_lastSummaryMs >= SUMMARY_INTERVAL_MS) {

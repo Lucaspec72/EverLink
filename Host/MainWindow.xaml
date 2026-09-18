@@ -33,6 +33,7 @@
                                         <ColumnDefinition Width="*"/>
                                         <ColumnDefinition Width="Auto"/>
                                         <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
 
                                     <!-- Relay name (large) + assigned controller (small,
@@ -58,19 +59,35 @@
                                         </StackPanel>
                                     </StackPanel>
 
-                                    <!-- Connection status (top) and USB capability (bottom),
-                                         same size/color as each other - deliberately NOT
-                                         styled like the name/controller pair above, since
-                                         these two lines are peers (both status readouts)
-                                         rather than a primary/secondary label pair. -->
-                                    <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,16,0" HorizontalAlignment="Right">
-                                        <TextBlock Text="{Binding ConnectionStatusLabel}" FontSize="10"
-                                                   Foreground="{Binding ConnectionStatusColor}" HorizontalAlignment="Right"/>
-                                        <TextBlock Text="{Binding UsbCapabilityLabel}" FontSize="10"
-                                                   Foreground="{Binding UsbCapabilityColor}" HorizontalAlignment="Right" Margin="0,1,0,0"/>
-                                    </StackPanel>
+                                    <!-- Connection status only now - the old second line
+                                         (USB Output: Supported/Unsupported) moved into the
+                                         compatibility-issues popup (see the warning button
+                                         below), alongside any other feature gaps a given
+                                         Relay has, rather than always occupying its own
+                                         line here even when there's nothing wrong to
+                                         report. VerticalAlignment/HorizontalAlignment
+                                         Center (rather than the old Right-aligned stack)
+                                         since this is now a single line, not a paired
+                                         readout that needed right-edge alignment to line
+                                         up with its partner line underneath. -->
+                                    <TextBlock Grid.Column="1" Text="{Binding ConnectionStatusLabel}" FontSize="10"
+                                               Foreground="{Binding ConnectionStatusColor}"
+                                               VerticalAlignment="Center" HorizontalAlignment="Center" Margin="0,0,10,0"/>
 
-                                    <Button Grid.Column="2" Content="Configure" FontSize="10" Padding="8,4" VerticalAlignment="Center"
+                                    <!-- Compatibility-issue warning button: only takes up
+                                         space/appears when this Relay actually has an
+                                         issue (see RelayRow.HasCompatibilityIssue) - a
+                                         Relay with nothing wrong shows no button at all
+                                         here, rather than a disabled/greyed one, so the
+                                         row doesn't visually change shape for the common
+                                         case of everything being fine. Sits left of
+                                         Configure, right of the connection status text. -->
+                                    <Button Grid.Column="2" Content="&#x26A0;" FontSize="12" Padding="6,2" VerticalAlignment="Center"
+                                            Margin="0,0,6,0" ToolTip="Compatibility issues"
+                                            Visibility="{Binding HasCompatibilityIssue, Converter={StaticResource BoolToVisibilityConverter}}"
+                                            Click="OpenIssuesButton_Click"/>
+
+                                    <Button Grid.Column="3" Content="Configure" FontSize="10" Padding="8,4" VerticalAlignment="Center"
                                             Click="OpenConfigureButton_Click"/>
                                 </Grid>
                             </DataTemplate>

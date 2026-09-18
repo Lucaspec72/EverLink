@@ -329,6 +329,50 @@ public class SdlControllerReader : IDisposable
     /// that would otherwise overflow on negation.</summary>
     private static short InvertAxis(short value) => value == short.MinValue ? short.MaxValue : (short)-value;
 
+    /// <summary>Plays rumble on this physical controller, mirroring a rumble command the
+    /// console sent to the emulated pad on the Relay side (see EverLink_Protocol.md's
+    /// "Rumble" section and SerialLink's RMBL: line parsing, which calls this). Left/right
+    /// are 0-255, matching the wire protocol's existing trigger scale - SDL wants 16-bit
+    /// (0-65535) motor strengths, so both are scaled up the same way SdlController.Poll()
+    /// scales SDL's wider trigger range down to fit the wire protocol's 0-255 on the way
+    /// in; this is the mirror image, going out.
+    ///
+    /// durationMs is short and re-sent on every change rather than tracking an explicit
+    /// "rumble off" event - Relay only reports a new RMBL: line when the level actually
+    /// changes (see EverLink_Protocol.md), so a steady non-zero rumble would otherwise
+    /// have no further calls to keep it alive past whatever duration was passed the first
+    /// time. Re-arming a short duration on every received line (including possible
+    /// identical repeats, since a game can re-issue the same rumble command) keeps it
+    /// playing continuously without needing a separate keep-alive timer here.
+    ///
+    /// Called from SerialLink's serial-port receive callback, NOT the UI thread that owns
+    /// SdlSubsystem.PumpEvents() - unlike Poll() above (whose own doc comment explains why
+    /// it deliberately avoids calling PumpEvents itself), that's fine here specifically
+    /// because SDL_RumbleGamepad's own documentation states it's safe to call from any
+    /// thread, which axis/button reads are not documented as being to the same degree
+    /// Poll() relies on.</summary>
+    public unsafe void Rumble(byte left, byte right, uint durationMs = 150)
+    {
+        if (_gamepadHandle == 0 || !IsConnected)
+        {
+            return;
+        }
+
+        ushort lowFreq = (ushort)Math.Clamp(left * 257, 0, 65535); // 0-255 -> 0-65535 (255*257≈65535)
+        ushort highFreq = (ushort)Math.Clamp(right * 257, 0, 65535);
+
+        try
+        {
+            SDL3.SDL_RumbleGamepad((SDL_Gamepad*)_gamepadHandle, lowFreq, highFreq, durationMs);
+        }
+        catch
+        {
+            // Best-effort - a controller that doesn't support rumble, or one that's
+            // dropped mid-call, shouldn't take down whatever's driving this (SerialLink's
+            // receive handling).
+        }
+    }
+
     /// <summary>Builds the string AppSettings.RelayMemory persists and matches against
     /// across app restarts - see RelayMemory's doc comment for the full reasoning. Layers
     /// the strongest identity signal SDL actually gives us:

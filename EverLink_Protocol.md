@@ -14,16 +14,25 @@ Before treating any COM port as an EverLink Relay, Host sends a single byte:
 A genuine Relay replies with a text line:
 
 ```
-IAM:EverLink:v1:<12 hex chars>:<chip model>
+IAM:EverLink:v<N>:<12 hex chars>:<chip model>
 ```
 
-where `<12 hex chars>` is the chip's factory-burned unique MAC address (from
-`ESP.getEfuseMac()`), and `<chip model>` is the string from `ESP.getChipModel()`
-(e.g. `ESP32`, `ESP32-S3`, `ESP32-S2`). Example:
+where `<N>` is the Relay firmware's protocol version (currently `2`), `<12 hex chars>`
+is the chip's factory-burned unique MAC address (from `ESP.getEfuseMac()`), and
+`<chip model>` is the string from `ESP.getChipModel()` (e.g. `ESP32`, `ESP32-S3`,
+`ESP32-S2`). Example:
 
 ```
-IAM:EverLink:v1:B0CBD8CCBEF0:ESP32
+IAM:EverLink:v2:B0CBD8CCBEF0:ESP32
 ```
+
+Host stays compatible with a `v1` Relay (an older firmware build still on the wire):
+the 14-byte controller packet, identification ping, and sync/checksum are unchanged
+between v1 and v2, and Host continues to talk to a v1 Relay normally. What v1 lacks
+is the rumble line below - Host detects the version from the ident reply and simply
+never sends/expects `RMBL:` traffic to/from a v1 Relay. This is surfaced to the user
+as a compatibility warning (see "Feature compatibility" below) rather than a hard
+failure, since everything else still works.
 
 The MAC is used as the stable device identity for user-assigned nicknames - NOT the COM
 port name, since COM port assignment can change if a board is moved to a different USB
@@ -90,6 +99,45 @@ Host's code did.
 0x4000  X
 0x8000  Y
 ```
+
+## Rumble (Relay -> Host, v2+)
+
+The console can ask the emulated Xbox 360 pad to rumble (e.g. a game's force-feedback
+event); Relay receives this via `ESP32XInput.onRumble(callback)` - a callback
+registered once in `setup()`, which the library invokes itself (from inside
+`ESP32XInput.pollRumble()`, called every `loop()` iteration) whenever the console's
+rumble command actually changes - and forwards the two motor levels to Host as a plain
+text line, so Host can, in turn, play the same rumble on the real physical controller
+feeding that Relay:
+
+```
+RMBL:<left>:<right>
+```
+
+where `<left>` and `<right>` are each the 8-bit (0-255) motor strength the callback
+receives - matching the same 0-255 scale the wire protocol already uses for triggers,
+so no separate scaling note is needed here (Host rescales these up to SDL's 16-bit
+rumble range on the way out, the mirror image of what it already does for trigger axes
+on the way in - see `Host/SdlController.cs`). Example:
+
+```
+RMBL:180:96
+```
+
+Sent only when the motor levels actually change, since the library's callback itself
+only fires on a change - there's no separate polling/comparison happening on Relay's
+side, it's simply forwarding each callback invocation as one line. This is why it's a
+simple text line alongside the existing debug summary rather than a new fixed-size binary
+frame like the controller packet: it's low-rate and doesn't need to survive
+misalignment/resync the way the continuous 250Hz stream does.
+
+A v1 Relay never sends this line at all (its firmware doesn't read rumble); Host
+does not wait for it or treat its absence as an error - it's purely additive. A v1
+Relay also never receives rumble commands from Host, since there's nothing on Host's
+side to send there either (Host only ever reacts to what Relay reports, it doesn't
+originate rumble commands) - the whole point of this feature is games on the console
+side, via Relay's USB HID connection, driving rumble back to the player's real pad,
+not the reverse.
 
 ## Why this shape
 
