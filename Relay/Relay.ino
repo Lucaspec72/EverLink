@@ -1,108 +1,152 @@
 /*
-  EverLink Relay - ESP32 Firmware (protocol v2)
-  ----------------------------------
-  Purpose: receives controller input from EverLink Host (the PC app) over a wired serial
-  connection and re-emits it as a real USB Xbox 360/XInput controller the console can see
-  directly. Requires a native-USB-capable board (S2/S3/P4-family chip) - see
-  DeviceInfo.IsUsbCapable on the Host side, which already warns the user about this before
-  they get here.
+  EverLink Relay - ESP32 Firmware (protocol v3)
+  ---------------------------------------------
+  Reference/default firmware: the stock relay this repo ships, with two modes - Wired
+  (XInput) over USB and Wireless (BLE). See RELAY_FORKING_GUIDE.txt if you're building a
+  variant (different Kind string, different Modes, a different console protocol).
+
+  Purpose: receives controller input from EverLink Host (the PC app) over serial and
+  re-emits it as either:
+    - Wired (XInput): a real USB Xbox 360/XInput HID controller. Needs a native-USB-capable
+      board (S2/S3/P4-family); Host already warns about this (DeviceInfo.IsUsbCapable).
+    - Wireless (BLE): a generic Bluetooth LE HID gamepad for a PC or phone. Works on any
+      BLE-capable ESP32. NOT an "Xbox controller" over the air and NOT reachable by an
+      actual Xbox console (see BLE_GAMEPAD_LIBRARY_NOTE / BLE_XBOX_CONSOLE_NOTE).
+  Exactly one mode is active at a time (g_activeModeIndex, EverLink_Protocol.md section 5).
 
   What it does:
-    - Responds to an identification ping (0xFE) with a confirmation + this firmware's
-      protocol version + this chip's unique MAC address and chip model, so EverLink Host
-      can tell genuine Relay devices apart from unrelated COM ports (without needing the
-      board to have been freshly rebooted) and know which protocol features this specific
-      Relay supports.
-    - Reads the 14-byte packet protocol described in EverLink_Protocol.md over Serial
-    - Validates the sync byte and XOR checksum, dropping (and holding last-good-state on)
-      anything that fails
-    - Mirrors the latest valid state onto a real USB Xbox 360 HID report the instant a
-      packet arrives, so console-side input latency is just this one hop
-    - Reads back rumble motor levels the console sends to the emulated pad and forwards
-      them to Host as a `RMBL:<left>:<right>` line whenever they change (new in v2 - see
-      EverLink_Protocol.md's "Rumble" section), so Host can play the same rumble on the
-      real physical controller feeding this Relay
-    - Every ~250ms, prints a human-readable summary line over Serial for live debugging
-      via any serial monitor (Host does not read or display this text)
+    - Answers an identification ping (0xFE) with protocol version, chip MAC + model, Kind,
+      Mode list and the active mode index, so Host can recognise a Relay at any time
+      (not just right after boot - hence ping/reply rather than a boot announcement).
+    - Reads the 14-byte packet protocol (EverLink_Protocol.md) over Serial, validating the
+      sync byte and XOR checksum; bad packets are dropped and the last good state held.
+    - Mirrors the latest valid state onto the active transport's HID report immediately.
+    - Wired mode: forwards console rumble to Host as `RMBL:<left>:<right>` (v2+). Wireless
+      mode has no rumble - the BLE gamepad library exposes no received-rumble callback.
+    - Handles mode-switch requests (0xFD <index>, v3+).
+    - Wireless mode: reports connection state to Host as `PAIR:<state>` lines (v3+,
+      section 6), state only - see BLE_NO_PEER_NAME_NOTE.
+    - Every ~250ms prints a human-readable summary line (debug only; Host ignores it).
+  Older relays: v1 lacks rumble and Kind/Modes; v2 adds rumble. Host detects the version
+  from the ident reply and degrades gracefully (see EverLink_Protocol.md).
 
-  Protocol version: this firmware is v2. v1 firmware sends everything above except the
-  rumble line, and its identification reply says "v1" instead of "v2" - Host detects this
-  from the ident reply and stays compatible with a v1 Relay, just without rumble support,
-  surfaced to the user as a compatibility warning rather than a failure. See
-  EverLink_Protocol.md for the exact wire differences.
+  Serial is full duplex, so replies/debug text never collide with incoming packets; only
+  one PROCESS may hold the COM port, which Host satisfies by owning it.
 
-  Why ping-based identification (not a boot-time announcement): a board that's already
-  been running for a while (e.g. left plugged in from an earlier session) wouldn't have
-  sent a boot announcement recently, and Host has no way to know if it missed one. A
-  ping/response works regardless of how long the board's been powered - Host can ask
-  "are you a Relay?" at any time, on demand, during a manual rescan.
+  Libraries:
+    - ESP32XInput: USB Xbox 360/XInput HID output (Wired mode).
+    - BleGamepad (lemmingDev/ESP32-BLE-Gamepad): BLE HID gamepad output (Wireless mode).
 
-  Why the same wire as controller data is fine: Host->Relay and Relay->Host are separate
-  physical lines on a UART (full duplex), so there's no collision between outgoing pings/
-  packets and incoming responses/debug text - only one PROCESS can hold the COM port,
-  which Host satisfies by owning it itself.
+  BLE_GAMEPAD_LIBRARY_NOTE - why generic BLE HID, not "BLE XInput":
+  The library's XInput emulation (Xbox One S/Series X descriptor over BLE) only exists on an
+  unreleased feature branch (GitHub issue #346, "v0.8.0-rc0", marked "hold off on merging
+  and releasing"). A relay firmware shouldn't depend on that, so this uses the stable
+  generic-BLE-HID mode. PCs/phones see a normal Bluetooth gamepad, fully functional for
+  input. If real BLE XInput ships in a stable release, wiring it in is a natural follow-up.
 
-  Library: ESP32XInput (provides the USB Xbox 360/XInput HID output itself - .setButton(),
-  .setStickLeft(), .send(), etc).
+  BLE_ALWAYS_RESIDENT_NOTE - why BLE starts lazily and is never torn down:
+  The stable library can't reliably stop/restart its BLE server (issue #314: end() does not
+  stop the server, stop advertising or disconnect the client, and the library re-advertises
+  by itself after a disconnect). So:
+    - BleGamepad is created and begin()'d the first time Wireless mode is activated
+      (ensureBleStarted()), NOT at boot - a Wired-only Relay never starts Bluetooth.
+    - Once started it stays resident. Leaving Wireless mode disconnects any peer and stops
+      advertising (endWirelessMode()); while Wired is active, enforceBleOffWhileWired()
+      repeats that because the library would otherwise quietly re-advertise.
+    - Returning to Wireless just restarts advertising (after force-disconnecting any
+      existing peer on a re-pair request).
+  What can't be done: free the BLE stack's memory/radio init once used.
 
-  Note on live USB connection status: earlier revisions of this firmware also emitted a
-  dedicated machine-readable "USB:ready"/"USB:not-ready" line, parsed by Host to show a
-  live "is the console currently connected" indicator. That was removed - confirmed
-  against TinyUSB's own issue tracker (the underlying USB device stack ESP32XInput is
-  built on), ESP32XInput.ready() reliably goes TRUE on enumeration but is NOT guaranteed
-  to go back to FALSE on a physical unplug for a bus-powered device (one powered off the
-  same cable it's signaling over, which is how this board normally runs) - see
-  https://github.com/hathach/tinyusb/issues/2478 and
-  https://github.com/espressif/esp-usb/issues/38. The underlying USB peripheral has no
-  way to tell "cable physically removed" apart from "host went briefly idle" without
-  separately monitoring the VBUS power-sense line, which requires an extra resistor
-  divider most boards don't have wired up. A status indicator that can silently go stale
-  and keep claiming "connected" after the cable's actually been pulled is worse than no
-  live indicator at all, so this firmware no longer tries to report it as a trustworthy
-  status - if reliable disconnect detection matters for your setup, the real fix is
-  wiring VBUS sense into the tinyusb_driver_install() config on a board that exposes
-  that pin (see the TinyUSB issues linked above for the exact steps) - out of scope for
-  this firmware as written.
+  BLE_XBOX_CONSOLE_NOTE - why this can never reach an actual Xbox console:
+  Xbox consoles have no Bluetooth radio; they need Microsoft's proprietary non-BLE "Xbox
+  Wireless" 2.4GHz protocol. No BLE firmware can appear as a controller to one. Wireless
+  mode is therefore PC/phone-only (EverLink_Protocol.md section 6, RELAY_FORKING_GUIDE.txt).
+
+  BLE_NO_PEER_NAME_NOTE - why PAIR:connected carries no device identity:
+  The Relay is the BLE peripheral; the PC/phone is the central, and a peripheral has no
+  standard way to learn a central's friendly name (NimBLEConnInfo exposes address and
+  encryption state only). Rather than dress a raw address up as a name, PAIR: lines report
+  state only: idle / searching / connected / disconnected.
+
+  BLE_MAPPING_NOTE - see the comment above the mapping block below.
+
+  Live USB connection status was deliberately removed: ESP32XInput.ready() goes TRUE on
+  enumeration but isn't guaranteed to go FALSE on a physical unplug for a bus-powered device
+  (https://github.com/hathach/tinyusb/issues/2478, https://github.com/espressif/esp-usb/issues/38).
+  A status indicator that can go stale is worse than none; reliable detection needs VBUS
+  sense wired into tinyusb_driver_install() on a board that exposes it - out of scope here.
+  BLE connection state has no such problem (a BLE disconnect is a real link-layer event),
+  which is why PAIR: exists for wireless only.
 */
 
 #include <Arduino.h>
 #include <ESP32XInput.h>
+#include <BleGamepad.h>
+// Included explicitly for NimBLEDevice::getServer(), NimBLEAdvertising and
+// BLE_ERR_REM_USER_CONN_TERM, used to control advertising and force-disconnect a peer
+// (see BLE_ALWAYS_RESIDENT_NOTE).
+#include <NimBLEDevice.h>
 
-// ---- Identification protocol ----
-// Host sends this single byte to ask "are you an EverLink Relay?"
-static const uint8_t PING_BYTE = 0xFE;
-// This firmware's protocol version - bumped to 2 for rumble support (see
-// EverLink_Protocol.md's "Rumble" section). Sent as part of the ident reply so Host can
-// tell a v1 Relay (no rumble) from a v2+ one without guessing from behavior.
-static const uint8_t PROTOCOL_VERSION = 2;
-// Prefix of our reply - Host checks for this exact prefix before trusting the version/
-// MAC/model that follows. Chosen to be extremely unlikely to appear as a false positive
-// from an unrelated device that happens to echo random bytes back.
+// Must stay above every function: the Arduino IDE inserts auto-generated prototypes
+// before any of this file's own code, so a function taking a PairState would otherwise
+// fail to compile ("PairState was not declared in this scope"). For the same reason, no
+// function in this file takes any OTHER custom type as a parameter.
+enum class PairState : uint8_t { Idle, Searching, Connected, Disconnected };
+
+// ---- Identification / command protocol (EverLink_Protocol.md sections 4-6) ----
+static const uint8_t PING_BYTE        = 0xFE;  // Host: "are you an EverLink Relay?"
+static const uint8_t MODE_SWITCH_BYTE = 0xFD;  // Host: followed by one byte = RELAY_MODES index
+static const uint8_t SYNC_BYTE        = 0xA5;  // starts every 14-byte data packet
+static const uint8_t PROTOCOL_VERSION = 3;
+// Host checks this exact prefix before trusting the rest of the reply.
 static const char* IDENT_PREFIX = "IAM:EverLink:v";
 
-// ---- Protocol constants (must match EverLink_Protocol.md and Host/SerialLink.cs exactly) ----
-static const uint8_t SYNC_BYTE = 0xA5;
+// Kind identifies THIS FIRMWARE (not the unit - that's the user's nickname in Host). Kept
+// generic since the firmware speaks more than one protocol. Forks should change it. Must
+// not contain ':', ',' or '|' (reserved by the wire format).
+static const char* RELAY_KIND = "EverLink Relay";
+// "Name|id" pairs, comma separated. Mode names spell out the real protocol so Wired isn't
+// mistaken for "just serial" nor Wireless for real Xbox Wireless. The index order must
+// match MODE_WIRED/MODE_WIRELESS below and stays fixed (indices are used by 0xFD).
+static const char* RELAY_MODES = "Wired (XInput)|wired,Wireless (BLE)|wireless";
+static const uint8_t MODE_WIRED    = 0;
+static const uint8_t MODE_WIRELESS = 1;
+static const uint8_t MODE_COUNT    = 2;
+
+// Starts Wired: the mode existing setups expect, with no pairing step before it's usable.
+static uint8_t g_activeModeIndex = MODE_WIRED;
+
+// ---- Constants ----
 static const size_t PACKET_SIZE = 14; // sync(1) + buttons(2) + LT(1) + RT(1) + 4x int16(8) + checksum(1)
-static const uint32_t BAUD_RATE = 921600;
+static const unsigned long BAUD_RATE = 921600;
 static const uint32_t SUMMARY_INTERVAL_MS = 250;
 
-// Real Xbox 360 controller VID/PID - what makes the console/PC on the other end recognize
-// this as a real Xbox 360 pad rather than a generic HID device.
+// Real Xbox 360 controller VID/PID, so the other end binds its native Xbox 360 driver.
 static const uint16_t XINPUT_VID = 0x045E;
 static const uint16_t XINPUT_PID = 0x028E;
+static const uint32_t XINPUT_POLL_INTERVAL_MS = 4; // 250Hz, matching the packet rate
 
-// Send USB state at the same cadence as incoming controller packets arrive - the library
-// enforces its own minimum interval internally, this just caps how often we ask it to.
-static const uint32_t XINPUT_POLL_INTERVAL_MS = 4;
-
-// ESP32XInput is a global object; ESP32XInputClass is its type - the enum lives on the type.
+// The enum lives on the library's type, not on the global ESP32XInput object.
 using XButton = ESP32XInputClass::Button;
 
+// Wireless (BLE) mode - see BLE_GAMEPAD_LIBRARY_NOTE.
+static const char* BLE_MANUFACTURER = "EverLink";
+// Reported as the BLE "Model Number"; receivers that build a name from manufacturer +
+// product (SDL) show "EverLink Controller" instead of "EverLink 1.0.0". Must be static:
+// the library keeps the pointer.
+static const char* BLE_MODEL_NUMBER = "Controller";
+static const uint8_t BLE_INITIAL_BATTERY = 100; // no real battery; a static 100 is the usual choice
+// Cap on BLE HID reports (~125 Hz). Host streams at 250 Hz but BLE connection intervals
+// are typically 7.5-30 ms; flooding makes the stack drop/queue reports, which shows up as
+// flicker. Only the latest state matters, so skipping intermediates loses nothing.
+static const uint32_t BLE_REPORT_MIN_INTERVAL_MS = 8;
+static const uint32_t BLE_WATCHDOG_INTERVAL_MS = 100;       // wired-mode "is BLE silent?" recheck
+static const uint32_t REPAIR_DISCONNECT_TIMEOUT_MS = 2000;  // stop waiting for a forced disconnect after this
+
 // ---- Button bit layout ----
-// This is EverLink's OWN bit assignment (see EverLink_Protocol.md) - it is not any single
-// input API's native layout. Host currently reads controllers via SDL3, not XInput; the
-// bit positions below just happen to have originally been chosen to match XInput's layout
-// for the buttons XInput could see, plus one extra (Guide) XInput could never expose.
+// EverLink's OWN bit assignment (EverLink_Protocol.md), not any single input API's layout.
+// Bits happen to match XInput's for the buttons XInput could see, plus Guide (reachable
+// now that Host reads via SDL3).
 enum ButtonBits : uint16_t {
   BTN_DPAD_UP     = 0x0001,
   BTN_DPAD_DOWN   = 0x0002,
@@ -114,11 +158,38 @@ enum ButtonBits : uint16_t {
   BTN_RTHUMB      = 0x0080,
   BTN_LSHOULDER   = 0x0100,
   BTN_RSHOULDER   = 0x0200,
-  BTN_GUIDE       = 0x0400, // only reachable now that Host reads via SDL, not XInput
+  BTN_GUIDE       = 0x0400,
   BTN_A           = 0x1000,
   BTN_B           = 0x2000,
   BTN_X           = 0x4000,
   BTN_Y           = 0x8000,
+};
+
+// One row per non-d-pad button: its EverLink bit, USB (XInput) button, BLE HID button
+// slot, and debug-summary name. The BLE slots are NOT in order - see BLE_MAPPING_NOTE.
+struct ButtonMap {
+  uint16_t bit;
+  XButton usb;
+  uint8_t ble;
+  const char* name;
+};
+static const ButtonMap BUTTON_MAP[] = {
+  { BTN_A,         XButton::A,              BUTTON_1,  "A"      },
+  { BTN_B,         XButton::B,              BUTTON_2,  "B"      },
+  { BTN_X,         XButton::X,              BUTTON_4,  "X"      },  // 3 is the unused "C" slot
+  { BTN_Y,         XButton::Y,              BUTTON_5,  "Y"      },
+  { BTN_START,     XButton::START,          BUTTON_12, "Start"  },
+  { BTN_BACK,      XButton::BACK,           BUTTON_11, "Back"   },  // 9/10 are the digital L2/R2 slots
+  { BTN_GUIDE,     XButton::XBOX,           BUTTON_13, "Guide"  },
+  { BTN_LSHOULDER, XButton::LEFT_SHOULDER,  BUTTON_7,  "LB"     },  // 6 is unused
+  { BTN_RSHOULDER, XButton::RIGHT_SHOULDER, BUTTON_8,  "RB"     },
+  { BTN_LTHUMB,    XButton::LEFT_THUMB,     BUTTON_14, "LThumb" },
+  { BTN_RTHUMB,    XButton::RIGHT_THUMB,    BUTTON_15, "RThumb" },
+};
+
+struct DpadName { uint16_t bit; const char* name; };
+static const DpadName DPAD_NAMES[] = {
+  { BTN_DPAD_UP, "DUp" }, { BTN_DPAD_DOWN, "DDown" }, { BTN_DPAD_LEFT, "DLeft" }, { BTN_DPAD_RIGHT, "DRight" },
 };
 
 struct ControllerState {
@@ -128,314 +199,527 @@ struct ControllerState {
   int16_t leftX, leftY;
   int16_t rightX, rightY;
 };
+// serviceBleReport() compares states with memcmp, which requires no padding.
+static_assert(sizeof(ControllerState) == 12, "ControllerState must be padding-free");
 
 static ControllerState g_lastState = {};
-static uint32_t g_packetsOk = 0;
-static uint32_t g_packetsBad = 0;
+static unsigned long g_packetsOk = 0;
+static unsigned long g_packetsBad = 0;
 static uint32_t g_lastSummaryMs = 0;
 
-// Latest rumble motor levels, set by onRumbleReceived() (registered as ESP32XInput's
-// rumble callback in setup() - see below) and read back by sendRumbleIfChanged() in
-// loop(). This firmware previously tried ESP32XInput.getLastRumbleLeft()/
-// getLastRumbleRight() as if pollRumble() populated some queryable "last known state" -
-// that was wrong. The library's actual API (per its own documentation) is
-// callback-based: ESP32XInput.onRumble(callback) registers a function the library calls
-// itself, from inside pollRumble(), whenever the console's rumble command actually
-// changes - there is no separate getter to poll instead. volatile because this is written
-// from the callback (invoked during pollRumble(), itself called from loop()) and read
-// from sendRumbleIfChanged() (also called from loop()) - both on the same thread in this
-// firmware's structure, so volatile here is a defensive habit rather than a strict
-// requirement, but costs nothing and protects against a future change that isn't.
+// Latest rumble levels, set by onRumbleReceived() - the callback ESP32XInput invokes from
+// inside pollRumble() (in loop()) whenever the console's rumble command CHANGES - and
+// forwarded to Host by sendRumbleIfChanged().
 static volatile uint8_t g_rumbleLeft = 0;
 static volatile uint8_t g_rumbleRight = 0;
 static volatile bool g_rumbleChangedSinceSent = false;
 
-// Registered with ESP32XInput.onRumble() in setup(). Called by the library itself
-// (from within pollRumble(), per its documented "invokes user callbacks on state
-// change" behavior) whenever the console's rumble command changes - NOT called on a
-// timer or every poll, only on an actual change, so g_rumbleChangedSinceSent here plays
-// the same "only send when different" role sendRumbleIfChanged() used to handle itself
-// by comparing against a remembered last-sent value. Keeping that comparison here too
-// (implicitly, by simply always marking changed on every callback invocation) rather
-// than re-deriving it from getters that don't exist in this library.
-void onRumbleReceived(uint8_t left, uint8_t right) {
-  g_rumbleLeft = left;
-  g_rumbleRight = right;
-  g_rumbleChangedSinceSent = true;
-}
+// ---- Shared helpers ----
 
-// Sends our identification reply, including this chip's factory-burned unique MAC address
-// and its chip model (e.g. "ESP32", "ESP32-S3") so Host can warn if this specific
-// board lacks the native USB peripheral needed for the HID/console-facing role.
-// getEfuseMac() returns a 48-bit value from hardware - guaranteed unique per chip, present
-// even on totally blank/first-boot chips, stable across reflashing. getChipModel() reads
-// the same chip-identity info esptool's chip_id command shows, just from within firmware.
-void sendIdentReply() {
-  uint64_t mac = ESP.getEfuseMac();
-  char macStr[13]; // 12 hex chars + null terminator
-  snprintf(macStr, sizeof(macStr), "%012llX", mac);
-
-  // Serial.print(PROTOCOL_VERSION) would hit the exact same uint8_t-prints-as-a-raw-byte
-  // trap documented in sendRumbleIfChanged() below - PROTOCOL_VERSION is a uint8_t, so
-  // that call would send the single byte 0x02, not the ASCII character '2', silently
-  // corrupting every ident reply this firmware ever sends (Host's TryPingDevice parses
-  // this field with int.TryParse, which would simply fail on a non-digit byte - the
-  // Relay would never even be recognized as a valid EverLink device). printf's %u forces
-  // decimal-digit output regardless of argument width, same fix applied there.
-  Serial.printf("%s%u:%s:%s\n", IDENT_PREFIX, PROTOCOL_VERSION, macStr, ESP.getChipModel());
-}
-
-// Checks for and handles a pending identification ping. Returns true if one was handled
-// (caller should not also try to parse a data packet this iteration, since the ping byte
-// was consumed here rather than left for the packet parser).
-bool tryHandlePing() {
-  if (Serial.available() < 1) return false;
-  if (Serial.peek() != PING_BYTE) return false;
-
-  Serial.read(); // consume the ping byte
-  sendIdentReply();
-  return true;
-}
-
-// Reads and validates one packet if a full one is available. Returns true if g_lastState
-// was updated. Non-blocking - call this every loop() iteration.
-bool tryReadPacket() {
-  // Need at least a full packet's worth of bytes buffered before attempting a parse.
-  if (Serial.available() < (int)PACKET_SIZE) return false;
-
-  // Look for sync byte without necessarily being aligned yet - if the first byte isn't
-  // 0xA5, discard it and try again next call. This lets us resync after any corruption.
-  if (Serial.peek() != SYNC_BYTE) {
-    Serial.read(); // discard misaligned byte
-    return false;
-  }
-
-  uint8_t buf[PACKET_SIZE];
-  size_t n = Serial.readBytes(buf, PACKET_SIZE);
-  if (n != PACKET_SIZE) return false; // shouldn't happen given the availability check above
-
-  // Verify checksum: XOR of bytes[1..12] should equal buf[13]
-  uint8_t checksum = 0;
-  for (size_t i = 1; i < PACKET_SIZE - 1; i++) checksum ^= buf[i];
-
-  if (checksum != buf[PACKET_SIZE - 1]) {
-    g_packetsBad++;
-    return false; // drop it - g_lastState intentionally left unchanged (hold last good state)
-  }
-
-  ControllerState s;
-  s.buttons      = (uint16_t)(buf[1] | (buf[2] << 8));
-  s.leftTrigger  = buf[3];
-  s.rightTrigger = buf[4];
-  s.leftX        = (int16_t)(buf[5]  | (buf[6]  << 8));
-  s.leftY        = (int16_t)(buf[7]  | (buf[8]  << 8));
-  s.rightX       = (int16_t)(buf[9]  | (buf[10] << 8));
-  s.rightY       = (int16_t)(buf[11] | (buf[12] << 8));
-
-  g_lastState = s;
-  g_packetsOk++;
-  return true;
-}
-
-// ---- USB XInput output ----
-
-// Translates the current g_lastState into a USB Xbox 360 HID report and sends it. Called
-// once per drained batch of incoming serial packets (see loop()), not on every single
-// packet, since only the newest state matters for what actually reaches the console.
-void updateUsbState() {
-  const uint16_t buttons = g_lastState.buttons;
-
-  // D-pad: ESP32XInput takes a single combined hat value rather than 4 independent
-  // button bits (matches the real Xbox 360 HID report layout, which encodes the d-pad
-  // as one 4-bit direction rather than 4 separate buttons).
-  //   0=Up 1=Up+Right 2=Right 3=Down+Right 4=Down 5=Down+Left 6=Left 7=Up+Left 8=released
+// D-pad as a compass index: 0=Up 1=Up+Right 2=Right 3=Down+Right 4=Down 5=Down+Left
+// 6=Left 7=Up+Left, 8=released (also returned for impossible opposing presses).
+static uint8_t dpadDirection(uint16_t buttons) {
   const bool up    = (buttons & BTN_DPAD_UP) != 0;
   const bool down  = (buttons & BTN_DPAD_DOWN) != 0;
   const bool left  = (buttons & BTN_DPAD_LEFT) != 0;
   const bool right = (buttons & BTN_DPAD_RIGHT) != 0;
+  if ((up && down) || (left && right)) return 8;
+  static const uint8_t DIRECTION[3][3] = {  // [none/up/down][none/right/left]
+    { 8, 2, 6 },
+    { 0, 1, 7 },
+    { 4, 3, 5 },
+  };
+  return DIRECTION[down ? 2 : (up ? 1 : 0)][left ? 2 : (right ? 1 : 0)];
+}
 
-  uint8_t hat = 8; // released - also the fallback for impossible opposing combos (up+down, left+right both held)
-  if (up && !down) {
-    if (right && !left) hat = 1;
-    else if (left && !right) hat = 7;
-    else if (!left && !right) hat = 0;
-  } else if (down && !up) {
-    if (right && !left) hat = 3;
-    else if (left && !right) hat = 5;
-    else if (!left && !right) hat = 4;
-  } else if (!up && !down) {
-    if (right && !left) hat = 2;
-    else if (left && !right) hat = 6;
-  }
-  ESP32XInput.setHat(hat);
+static int16_t readLe16(const uint8_t* p) { return (int16_t)(p[0] | (p[1] << 8)); }
 
-  ESP32XInput.setButton(XButton::START, (buttons & BTN_START) != 0);
-  ESP32XInput.setButton(XButton::BACK, (buttons & BTN_BACK) != 0);
-  ESP32XInput.setButton(XButton::XBOX, (buttons & BTN_GUIDE) != 0);
-  ESP32XInput.setButton(XButton::LEFT_THUMB, (buttons & BTN_LTHUMB) != 0);
-  ESP32XInput.setButton(XButton::RIGHT_THUMB, (buttons & BTN_RTHUMB) != 0);
-  ESP32XInput.setButton(XButton::LEFT_SHOULDER, (buttons & BTN_LSHOULDER) != 0);
-  ESP32XInput.setButton(XButton::RIGHT_SHOULDER, (buttons & BTN_RSHOULDER) != 0);
-  ESP32XInput.setButton(XButton::A, (buttons & BTN_A) != 0);
-  ESP32XInput.setButton(XButton::B, (buttons & BTN_B) != 0);
-  ESP32XInput.setButton(XButton::X, (buttons & BTN_X) != 0);
-  ESP32XInput.setButton(XButton::Y, (buttons & BTN_Y) != 0);
+// ---- USB XInput output ----
 
-  // Triggers: EverLink wire format is 0..255 (matches classic XInput); ESP32XInput wants
-  // 0..32768. Scaled here rather than changing the wire protocol, which stays fixed so
-  // Host doesn't need to know or care what any particular Relay's output library expects.
-  uint16_t leftTrigger  = (uint16_t)(((uint32_t)g_lastState.leftTrigger  * 32768UL) / 255UL);
-  uint16_t rightTrigger = (uint16_t)(((uint32_t)g_lastState.rightTrigger * 32768UL) / 255UL);
-  ESP32XInput.setLeftTrigger(leftTrigger);
-  ESP32XInput.setRightTrigger(rightTrigger);
+// Translates g_lastState into a USB Xbox 360 HID report and sends it. Called once per
+// drained batch of serial packets (see loop()): only the newest state reaches the console.
+static void updateUsbState() {
+  const uint16_t buttons = g_lastState.buttons;
 
-  // Sticks: EverLink already uses signed int16, matching XInput's native range exactly -
-  // no rescaling needed.
+  // ESP32XInput takes one combined hat value (like the real Xbox 360 report), and its
+  // numbering is exactly dpadDirection()'s.
+  ESP32XInput.setHat(dpadDirection(buttons));
+  for (const ButtonMap& m : BUTTON_MAP) ESP32XInput.setButton(m.usb, (buttons & m.bit) != 0);
+
+  // Triggers: wire format is 0..255, ESP32XInput wants 0..32768. Scaled here so the wire
+  // protocol doesn't depend on any one Relay's output library.
+  ESP32XInput.setLeftTrigger((uint16_t)(((uint32_t)g_lastState.leftTrigger * 32768UL) / 255UL));
+  ESP32XInput.setRightTrigger((uint16_t)(((uint32_t)g_lastState.rightTrigger * 32768UL) / 255UL));
+
+  // Sticks: signed int16 on the wire, XInput's native range - no rescaling.
   ESP32XInput.setStickLeft(g_lastState.leftX, g_lastState.leftY);
   ESP32XInput.setStickRight(g_lastState.rightX, g_lastState.rightY);
 
   ESP32XInput.send();
 }
 
-// ---- Rumble reporting (Relay -> Host, v2+) ----
+// ---- Wireless (BLE) output ----
+// Read BLE_GAMEPAD_LIBRARY_NOTE, BLE_ALWAYS_RESIDENT_NOTE, BLE_XBOX_CONSOLE_NOTE and
+// BLE_NO_PEER_NAME_NOTE at the top of this file before touching anything below.
 
-// Reads the rumble motor levels the console has told the emulated pad to play (serviced
-// by ESP32XInput.pollRumble() in loop(), which must run first) and, if either level has
-// changed since the last report, sends a `RMBL:<left>:<right>` line to Host - see
-// EverLink_Protocol.md's "Rumble" section. Cheap enough to call every loop() iteration:
-// this only compares two bytes and does nothing further unless they differ.
-// Forwards the latest rumble state to Host as a `RMBL:<left>:<right>` line - see
-// EverLink_Protocol.md's "Rumble" section. Only sends when onRumbleReceived() has set
-// g_rumbleChangedSinceSent, i.e. only after ESP32XInput's own callback has actually
-// fired with a changed value - this firmware doesn't do its own change-detection
-// against a remembered previous value anymore (there's nothing to poll/compare against
-// between callback firings), it just trusts the library's "callback only fires on
-// change" behavior and forwards whatever the callback most recently reported, once.
-void sendRumbleIfChanged() {
+// bleGamepad is allocated by ensureBleStarted(), not a global object, because its
+// constructor needs a name built from ESP.getEfuseMac(), which isn't safe to call during
+// static initialization. nullptr = BLE has never been started since boot.
+static BleGamepad* g_bleGamepad = nullptr;
+
+static ControllerState g_lastBleSentState = {};
+static bool g_bleForceNextReport = true;   // send next report even if unchanged (e.g. right after connecting)
+static uint32_t g_lastBleReportMs = 0;
+static uint32_t g_lastBleWatchdogMs = 0;
+static bool g_awaitingRepairDisconnect = false;
+static uint32_t g_repairDisconnectIssuedMs = 0;
+static PairState g_currentPairState = PairState::Idle;   // what we believe
+static PairState g_lastSentPairState = PairState::Idle;  // what Host was last told
+
+static inline bool bleConnected() { return g_bleGamepad != nullptr && g_bleGamepad->isConnected(); }
+
+// >>> BLE_MAPPING_BEGIN
+// ---- BLE_MAPPING_NOTE - the layout receivers actually assume for a generic HID gamepad ----
+// A generic BLE HID gamepad has no spec-defined "A button" or "right stick": the receiver
+// decides. Every mainstream stack (Linux evdev/SDL, Android, positional readers) converges
+// on the layout the real Xbox/PlayStation descriptors follow:
+//
+//   AXES. The library's descriptor/report order is X, Y, Z, Rz, Rx, Ry (setHIDAxes()) -
+//   Z/Rz come BEFORE Rx/Ry:
+//       X  = left stick X        Z  = right stick X       Rx = left trigger
+//       Y  = left stick Y        Rz = right stick Y       Ry = right trigger
+//   (positional readers: axes 0,1 = LS; 2,3 = RS; 4,5 = triggers).
+//
+//   TRIGGERS are sent THREE ways at once because receivers disagree (a real DualShock
+//   reports analog AND digital too):
+//     - Brake (left) / Accelerator (right) simulation controls: what a real Xbox BLE pad
+//       uses; Android/Linux treat them as the analog L2/R2.
+//     - Rx (left) / Ry (right): DualShock-style and positional (SDL "a4/a5") readers.
+//     - Buttons 9 (L2) / 10 (R2), digital, only at a (near) full pull - see below.
+//
+//   BUTTONS. HID "Button N" becomes gamepad button (N-1) of the Linux/Android table:
+//   1=A 2=B 3=(C) 4=X 5=Y 6=(Z) 7=LB 8=RB 9=(L2) 10=(R2) 11=Back 12=Start 13=Guide
+//   14=L3 15=R3. Slots 3, 6, 9, 10 are unused by face/shoulder buttons - that's why a
+//   naive 1..11 table broke (X on the dead "C" slot, Y/LB/RB shifted, L3/R3 on L2/R2).
+//
+//   History: an earlier revision passed (LX, LY, LT, RX, RY, RT) to setAxes(), putting the
+//   triggers on the receiver's RIGHT STICK slots and the real right stick on its TRIGGER
+//   slots (a right stick stuck upper-left that moved when a trigger was pulled). The
+//   per-axis setters used below are bound to the HID usage by name in every library
+//   release, unlike setAxes(), whose parameter order changed between v0.7.1 and v0.7.2.
+
+// The library has ONE axis range for every axis (set in ensureBleStarted()), so triggers
+// travel through the same signed range as the sticks: released = -32767, full pull = +32767.
+static inline int16_t bleClamp(int32_t v) { return (int16_t)(v < -32767 ? -32767 : (v > 32767 ? 32767 : v)); }
+static inline int16_t bleAxis(int16_t v) { return bleClamp(v); }
+// Host's wire format is XInput's (Y positive = UP); generic HID is the opposite (Y positive
+// = DOWN), so both sticks' Y are inverted.
+static inline int16_t bleAxisInverted(int16_t v) { return bleClamp(-(int32_t)v); }
+static inline int16_t bleTrigger(uint8_t t) { return (int16_t)(((int32_t)t * 65534L) / 255L - 32767L); }
+// Brake/Accelerator have their OWN range (0..32767, ensureBleStarted()), so released is 0.
+static inline int16_t bleSimTrigger(uint8_t t) { return (int16_t)(((uint32_t)t * 32767UL) / 255UL); }
+
+// Digital L2/R2 (buttons 9/10) is only a fallback for receivers that ignore the analog
+// axes, so it must not fire early: Android prefers a pressed L2/R2 KEY over the analog
+// axis, so a press at 12% pull made a good analog trigger look digital. It trips only at
+// (almost) full pull, where analog reads ~1.0 anyway, with hysteresis so a trigger held at
+// full doesn't chatter. Set BLE_TRIGGER_DIGITAL_PRESS to 256 to disable the digital buttons.
+static const uint16_t BLE_TRIGGER_DIGITAL_PRESS = 250;
+static const uint16_t BLE_TRIGGER_DIGITAL_RELEASE = 230;
+static inline bool bleTriggerDigital(uint8_t value, bool wasDown) {
+  return value >= (wasDown ? BLE_TRIGGER_DIGITAL_RELEASE : BLE_TRIGGER_DIGITAL_PRESS);
+}
+
+// BleGamepad hat constants indexed by dpadDirection()'s result.
+static const uint8_t BLE_HAT[9] = {
+  HAT_UP, HAT_UP_RIGHT, HAT_RIGHT, HAT_DOWN_RIGHT, HAT_DOWN, HAT_DOWN_LEFT, HAT_LEFT, HAT_UP_LEFT, HAT_CENTERED,
+};
+
+static inline void bleSetButton(uint8_t button, bool pressed) {
+  if (pressed) g_bleGamepad->press(button);
+  else g_bleGamepad->release(button);
+}
+
+// Translates g_lastState into ONE BLE HID report and sends it - the Wireless-mode
+// counterpart of updateUsbState(). Auto-report is disabled (ensureBleStarted()), so the
+// setters below only edit the pending report; nothing goes out until sendReport().
+// Caller (serviceBleReport()) guarantees BLE is started and connected.
+static void sendBleReport() {
+  const uint16_t buttons = g_lastState.buttons;
+  for (const ButtonMap& m : BUTTON_MAP) bleSetButton(m.ble, (buttons & m.bit) != 0);
+  g_bleGamepad->setHat1(BLE_HAT[dpadDirection(buttons)]);
+
+  g_bleGamepad->setX(bleAxis(g_lastState.leftX));            // left stick X
+  g_bleGamepad->setY(bleAxisInverted(g_lastState.leftY));    // left stick Y
+  g_bleGamepad->setZ(bleAxis(g_lastState.rightX));           // right stick X
+  g_bleGamepad->setRZ(bleAxisInverted(g_lastState.rightY));  // right stick Y
+  g_bleGamepad->setRX(bleTrigger(g_lastState.leftTrigger));  // left trigger
+  g_bleGamepad->setRY(bleTrigger(g_lastState.rightTrigger)); // right trigger
+  g_bleGamepad->setBrake(bleSimTrigger(g_lastState.leftTrigger));
+  g_bleGamepad->setAccelerator(bleSimTrigger(g_lastState.rightTrigger));
+
+  static bool l2Down = false, r2Down = false;  // remembered between reports for the hysteresis
+  l2Down = bleTriggerDigital(g_lastState.leftTrigger, l2Down);
+  r2Down = bleTriggerDigital(g_lastState.rightTrigger, r2Down);
+  bleSetButton(BUTTON_9, l2Down);
+  bleSetButton(BUTTON_10, r2Down);
+
+  g_bleGamepad->sendReport();
+}
+// <<< BLE_MAPPING_END
+
+// Called every loop() iteration while Wireless is active. Sends a report only when the
+// state changed (or a fresh connection needs the full state once) and no more often than
+// BLE_REPORT_MIN_INTERVAL_MS. Polled, not event-driven, so a change landing inside the
+// rate-limit window is simply sent on a later iteration - the final state always gets out.
+static void serviceBleReport() {
+  if (!bleConnected()) {
+    g_bleForceNextReport = true;  // whoever connects next needs the full current state
+    return;
+  }
+  if (!g_bleForceNextReport && memcmp(&g_lastState, &g_lastBleSentState, sizeof(ControllerState)) == 0) return;
+
+  const uint32_t now = millis();
+  if (now - g_lastBleReportMs < BLE_REPORT_MIN_INTERVAL_MS) return;
+
+  g_lastBleReportMs = now;
+  g_bleForceNextReport = false;
+  g_lastBleSentState = g_lastState;
+  sendBleReport();
+}
+
+// ---- BLE advertising / connection control ----
+// These reach past BleGamepad's public API into NimBLE - see BLE_ALWAYS_RESIDENT_NOTE.
+
+static NimBLEAdvertising* bleAdvertising() {
+  NimBLEServer* server = NimBLEDevice::getServer();
+  return server ? server->getAdvertising() : nullptr;
+}
+
+static void startBleAdvertising() {
+  NimBLEAdvertising* adv = bleAdvertising();
+  if (adv != nullptr && !adv->isAdvertising()) adv->start();
+}
+
+static void stopBleAdvertising() {
+  NimBLEAdvertising* adv = bleAdvertising();
+  if (adv != nullptr && adv->isAdvertising()) adv->stop();
+}
+
+// Asks the connected peer (if any) to disconnect. Returns true if a disconnect was issued.
+static bool disconnectBlePeer() {
+  if (!bleConnected()) return false;
+  NimBLEServer* server = NimBLEDevice::getServer();
+  if (server == nullptr) return false;
+  server->disconnect(g_bleGamepad->getPeerInfo(), BLE_ERR_REM_USER_CONN_TERM);
+  return true;
+}
+
+// Brings up the BLE gamepad the first time it's needed (NOT at boot, so a Wired-only Relay
+// never starts Bluetooth). begin() starts advertising by itself.
+static void ensureBleStarted() {
+  if (g_bleGamepad != nullptr) return;
+
+  // Advertised name: "<RELAY_KIND> (<last 4 hex of MAC>)", e.g. "EverLink Relay (BEF0)" -
+  // see EverLink_Protocol.md's "Kind as the basis for a wireless advertised name".
+  char bleName[48];
+  snprintf(bleName, sizeof(bleName), "%s (%04X)", RELAY_KIND, (unsigned)(ESP.getEfuseMac() & 0xFFFFu));
+  g_bleGamepad = new BleGamepad(bleName, BLE_MANUFACTURER, BLE_INITIAL_BATTERY);
+
+  // The descriptor is declared EXPLICITLY (not library defaults) so it is known and
+  // stable: 15 buttons, 6 axes in the library's X,Y,Z,Rz,Rx,Ry order, Brake + Accelerator,
+  // 1 hat. See BLE_MAPPING_NOTE for what each slot means to a receiver.
+  BleGamepadConfiguration config;
+  config.setAutoReport(false);              // one explicit sendReport() per update
+  config.setAxesMin(-32767);                // the library has one range for ALL axes
+  config.setAxesMax(32767);
+  config.setModelNumber(BLE_MODEL_NUMBER);  // device name shown by SDL etc.
+  config.setIncludeBrake(true);             // analog left trigger  (Simulation Controls page)
+  config.setIncludeAccelerator(true);       // analog right trigger
+  config.setSimulationMin(0);               // own range, separate from the axes: released = 0
+  config.setSimulationMax(32767);
+  config.setButtonCount(15);                // Button 1..15 (slots 3,6,9,10 are special - see BLE_MAPPING_NOTE)
+  config.setHatSwitchCount(1);
+  config.setWhichAxes(true, true, true, true, true, true, false, false);  // X,Y,Z,RX,RY,RZ on; sliders off
+  g_bleGamepad->begin(&config);
+
+  Serial.printf("BLE gamepad started as \"%s\" (15 buttons, 6 axes, 1 hat).\n", bleName);
+}
+
+// ---- Wireless mode lifecycle ----
+
+// Entering (or re-entering) Wireless mode = start pairing (EverLink_Protocol.md section 5/6).
+static void beginWirelessMode() {
+  // The USB side stays enumerated (no supported way to shut ESP32XInput down), but don't
+  // leave the console holding stuck inputs while we're not feeding it.
+  ESP32XInput.releaseAll();
+  ESP32XInput.send();
+
+  const bool firstStart = (g_bleGamepad == nullptr);
+  ensureBleStarted();  // on first start this also begins advertising
+  g_bleForceNextReport = true;
+
+  if (!firstStart) {
+    // Re-pair request. If something is connected, drop it first (advertising can't offer a
+    // new connection on top of an existing one) and wait for the link to really go down -
+    // see sendPairStatusIfChanged().
+    if (disconnectBlePeer()) {
+      g_awaitingRepairDisconnect = true;
+      g_repairDisconnectIssuedMs = millis();
+    }
+    startBleAdvertising();
+  }
+}
+
+// Leaving Wireless mode: nothing may stay connected or discoverable. Idempotent and cheap,
+// which lets the watchdog below call it repeatedly.
+static void endWirelessMode() {
+  g_awaitingRepairDisconnect = false;
+  if (g_bleGamepad == nullptr) return;  // BLE never started - nothing on the air
+  disconnectBlePeer();
+  stopBleAdvertising();
+}
+
+// Runs from loop() while Wired is active. The library re-advertises by itself after a
+// disconnect, which would silently undo endWirelessMode() - this keeps BLE silent.
+static void enforceBleOffWhileWired() {
+  if (g_bleGamepad == nullptr) return;
+  const uint32_t now = millis();
+  if (now - g_lastBleWatchdogMs < BLE_WATCHDOG_INTERVAL_MS) return;
+  g_lastBleWatchdogMs = now;
+  endWirelessMode();
+}
+
+// ---- Pairing status (Relay -> Host, EverLink_Protocol.md section 6) ----
+
+// Sends the PAIR: line for a state unconditionally (bypassing "only if changed").
+static void sendPairStateNow(PairState state) {
+  static const char* const NAMES[] = { "idle", "searching", "connected", "disconnected" };  // PairState order
+  g_lastSentPairState = state;
+  Serial.printf("PAIR:%s\n", NAMES[(uint8_t)state]);
+}
+
+// Called every loop() iteration while Wireless is active. isConnected() is the source of
+// truth for connect/disconnect; "searching" is tracked by this firmware (set when pairing
+// is (re)triggered), not read from the library.
+//   - link comes up                                      -> connected
+//   - link goes down on its own (peer disconnected/unpaired us) -> disconnected
+//   - link goes down because WE forced it for a re-pair  -> stays searching
+static void sendPairStatusIfChanged() {
+  const bool connected = bleConnected();
+
+  if (g_awaitingRepairDisconnect) {
+    if (!connected) {
+      g_awaitingRepairDisconnect = false;  // the link we dropped on purpose is gone
+      startBleAdvertising();               // don't rely on the library re-advertising in time
+    } else if (millis() - g_repairDisconnectIssuedMs > REPAIR_DISCONNECT_TIMEOUT_MS) {
+      g_awaitingRepairDisconnect = false;  // disconnect never happened; report what's true
+    } else {
+      return;  // still connected only because the drop hasn't landed yet - not news
+    }
+  }
+
+  if (connected) g_currentPairState = PairState::Connected;
+  else if (g_currentPairState == PairState::Connected) g_currentPairState = PairState::Disconnected;
+  // Otherwise keep whatever setActiveMode() last set (Searching) or Disconnected.
+
+  if (g_currentPairState != g_lastSentPairState) sendPairStateNow(g_currentPairState);
+}
+
+// Switches the active mode (MODE_WIRED or MODE_WIRELESS) - EverLink_Protocol.md section 5.
+// Safe with the mode that's already active; for MODE_WIRELESS that is a deliberate re-pair.
+//
+// The MODE: acknowledgement is sent FIRST: Host discards PAIR: lines that arrive while it
+// still believes the active mode is wired (that's how it filters stale status), so a
+// PAIR:searching sent ahead of the ack would be thrown away on the very switch that
+// triggers it.
+static void setActiveMode(uint8_t newIndex) {
+  g_activeModeIndex = newIndex;
+  Serial.printf("MODE:%u\n", g_activeModeIndex);
+
+  if (newIndex == MODE_WIRELESS) {
+    beginWirelessMode();  // may block for a moment on first start (BLE stack init)
+    g_currentPairState = PairState::Searching;
+    sendPairStateNow(g_currentPairState);
+  } else {
+    endWirelessMode();
+    // Nothing to report: Host ignores PAIR: while wired and resets its copy to idle on
+    // the MODE: ack above. Just keep our bookkeeping consistent.
+    g_currentPairState = PairState::Idle;
+    g_lastSentPairState = PairState::Idle;
+  }
+}
+
+// ---- Rumble reporting (Relay -> Host, v2+, EverLink_Protocol.md "Rumble") ----
+
+// Registered with ESP32XInput.onRumble() in setup(). The library calls it from within
+// pollRumble() only when the console's rumble command actually changes.
+static void onRumbleReceived(uint8_t left, uint8_t right) {
+  g_rumbleLeft = left;
+  g_rumbleRight = right;
+  g_rumbleChangedSinceSent = true;
+}
+
+// Forwards the latest rumble state as `RMBL:<left>:<right>`, once per change. Run after
+// pollRumble(). %u (not Serial.print) is essential: Serial.print(uint8_t) writes the raw
+// byte, not decimal digits - the same trap applies to every uint8_t printed in this file.
+static void sendRumbleIfChanged() {
   if (!g_rumbleChangedSinceSent) return;
-
-  // Snapshot before clearing the flag - onRumbleReceived() could in principle fire again
-  // between these two lines (it's called from pollRumble(), not from an interrupt, so in
-  // this firmware's single-threaded loop() structure it actually can't during this
-  // window - but reading into locals first costs nothing and avoids relying on that).
-  uint8_t left = g_rumbleLeft;
-  uint8_t right = g_rumbleRight;
+  const uint8_t left = g_rumbleLeft;
+  const uint8_t right = g_rumbleRight;
   g_rumbleChangedSinceSent = false;
-
-  // IMPORTANT: Serial.print(uint8_t) does NOT print decimal digits - uint8_t overloads
-  // resolve the same as char/byte, so Serial.print(left) would send the raw 8-bit VALUE
-  // as a single byte (e.g. the byte 0xB4 for 180), not the three ASCII characters "1",
-  // "8", "0". printf's %u format specifier forces decimal-digit output regardless of the
-  // argument's underlying width, sidestepping that trap entirely - same fix as
-  // printSummary() already uses for LT/RT (also uint8_t) further down in this file, and
-  // as sendIdentReply() above now also uses for PROTOCOL_VERSION.
   Serial.printf("RMBL:%u:%u\n", left, right);
+}
+
+// ---- Serial input: identification, mode switch, data packets ----
+
+// Identification reply: version, chip MAC (factory-burned, unique, stable across
+// reflashing) and chip model (so Host can warn when the board lacks native USB), Kind, the
+// Mode list, and the ACTIVE mode's index. The list is always sent in the same fixed order
+// (indices stay stable for 0xFD), so the active mode can't be inferred from it and Host
+// needs it stated - a rescan can happen while Wireless is active. %u keeps the version and
+// index as decimal digits (Serial.print(uint8_t) would send a raw byte and Host's
+// int.TryParse would never recognise the Relay).
+static void sendIdentReply() {
+  char macStr[13];  // 12 hex chars + null
+  snprintf(macStr, sizeof(macStr), "%012llX", (unsigned long long)ESP.getEfuseMac());
+  Serial.printf("%s%u:%s:%s:%s:%s:%u\n",
+    IDENT_PREFIX, PROTOCOL_VERSION, macStr, ESP.getChipModel(), RELAY_KIND, RELAY_MODES, g_activeModeIndex);
+}
+
+// Handles the index byte following a consumed MODE_SWITCH_BYTE. The two bytes are sent
+// back-to-back, so block briefly for the second rather than stall the parser; if it never
+// comes, give up (the command byte stays consumed). An out-of-range index is silently
+// ignored, matching the protocol doc's "does not reply if unsupported".
+static void handleModeSwitch() {
+  const uint32_t waitStart = millis();
+  while (Serial.available() < 1) {
+    if (millis() - waitStart > 50) return;
+  }
+  const uint8_t requestedIndex = (uint8_t)Serial.read();
+  if (requestedIndex < MODE_COUNT) setActiveMode(requestedIndex);  // also sends the MODE: ack
+}
+
+// Reads and validates one data packet whose sync byte is at the head of the buffer and
+// whose remaining bytes are already buffered. Returns true if g_lastState was updated; on
+// a bad checksum the packet is dropped and the last good state held.
+static bool readPacket() {
+  uint8_t buf[PACKET_SIZE];
+  if (Serial.readBytes(buf, PACKET_SIZE) != PACKET_SIZE) return false;  // can't happen after the availability check
+
+  uint8_t checksum = 0;  // XOR of bytes[1..12] must equal buf[13]
+  for (size_t i = 1; i < PACKET_SIZE - 1; i++) checksum ^= buf[i];
+  if (checksum != buf[PACKET_SIZE - 1]) {
+    g_packetsBad++;
+    return false;
+  }
+
+  g_lastState.buttons      = (uint16_t)(buf[1] | (buf[2] << 8));
+  g_lastState.leftTrigger  = buf[3];
+  g_lastState.rightTrigger = buf[4];
+  g_lastState.leftX  = readLe16(&buf[5]);
+  g_lastState.leftY  = readLe16(&buf[7]);
+  g_lastState.rightX = readLe16(&buf[9]);
+  g_lastState.rightY = readLe16(&buf[11]);
+  g_packetsOk++;
+  return true;
+}
+
+// Drains everything currently buffered, dispatching on each lead byte: ping (0xFE), mode
+// switch (0xFD) or data packet (0xA5). Anything else is a misaligned byte and is discarded
+// to resync. A single dispatcher (rather than separate ping/mode/packet parsers) means a
+// command that has other data buffered ahead of or behind it is still seen as a command
+// rather than swallowed as garbage by the packet parser. Returns true if a valid packet
+// updated g_lastState.
+static bool processSerialInput() {
+  bool gotPacket = false;
+  while (Serial.available() > 0) {
+    switch (Serial.peek()) {
+      case PING_BYTE:
+        Serial.read();
+        sendIdentReply();
+        break;
+      case MODE_SWITCH_BYTE:
+        Serial.read();
+        handleModeSwitch();
+        break;
+      case SYNC_BYTE:
+        if (Serial.available() < (int)PACKET_SIZE) return gotPacket;  // wait for the rest
+        if (readPacket()) gotPacket = true;
+        break;
+      default:
+        Serial.read();  // misaligned byte
+        break;
+    }
+  }
+  return gotPacket;
 }
 
 // ---- Debug output ----
 
-void appendIfPressed(String &out, uint16_t buttons, uint16_t bit, const char *name) {
-  if (buttons & bit) {
-    if (out.length() > 0) out += ",";
-    out += name;
-  }
+static void appendName(char* buf, size_t size, const char* name) {
+  const size_t len = strlen(buf);
+  snprintf(buf + len, size - len, "%s%s", len ? "," : "", name);
 }
 
-void printSummary() {
-  String pressed;
-  appendIfPressed(pressed, g_lastState.buttons, BTN_A, "A");
-  appendIfPressed(pressed, g_lastState.buttons, BTN_B, "B");
-  appendIfPressed(pressed, g_lastState.buttons, BTN_X, "X");
-  appendIfPressed(pressed, g_lastState.buttons, BTN_Y, "Y");
-  appendIfPressed(pressed, g_lastState.buttons, BTN_START, "Start");
-  appendIfPressed(pressed, g_lastState.buttons, BTN_BACK, "Back");
-  appendIfPressed(pressed, g_lastState.buttons, BTN_GUIDE, "Guide");
-  appendIfPressed(pressed, g_lastState.buttons, BTN_LSHOULDER, "LB");
-  appendIfPressed(pressed, g_lastState.buttons, BTN_RSHOULDER, "RB");
-  appendIfPressed(pressed, g_lastState.buttons, BTN_LTHUMB, "LThumb");
-  appendIfPressed(pressed, g_lastState.buttons, BTN_RTHUMB, "RThumb");
-  appendIfPressed(pressed, g_lastState.buttons, BTN_DPAD_UP, "DUp");
-  appendIfPressed(pressed, g_lastState.buttons, BTN_DPAD_DOWN, "DDown");
-  appendIfPressed(pressed, g_lastState.buttons, BTN_DPAD_LEFT, "DLeft");
-  appendIfPressed(pressed, g_lastState.buttons, BTN_DPAD_RIGHT, "DRight");
-  if (pressed.length() == 0) pressed = "-";
+static void printSummary() {
+  const uint16_t buttons = g_lastState.buttons;
+  char pressed[80] = "";  // all 15 names + separators come to ~68 chars
+  for (const ButtonMap& m : BUTTON_MAP) if (buttons & m.bit) appendName(pressed, sizeof(pressed), m.name);
+  for (const DpadName& d : DPAD_NAMES) if (buttons & d.bit) appendName(pressed, sizeof(pressed), d.name);
+  if (pressed[0] == '\0') strcpy(pressed, "-");
 
-  // ESP32XInput.ready() reflects whether this board has been enumerated as an Xbox 360
-  // controller by whatever's plugged into its USB port - included here as raw debug
-  // telemetry only, not a trustworthy live connection indicator (see this file's top
-  // comment for why: it doesn't reliably clear on a physical unplug). Host does not
-  // parse or display this value; it's just part of the human-readable summary line, for
-  // whoever happens to be watching this board's serial output with that caveat in mind.
-  bool everEnumerated = ESP32XInput.ready();
-
+  // ESP32XInput.ready() = "has been enumerated by whatever's on the USB port". Raw debug
+  // telemetry only, NOT a trustworthy live indicator (it doesn't reliably clear on unplug -
+  // see the top-of-file note). Host does not parse this line.
   Serial.printf(
-    "[%lums] Btns:%-40s LT:%3u RT:%3u LX:%6d LY:%6d RX:%6d RY:%6d | ok:%lu bad:%lu USBEnumerated:%s RumbleL:%3u RumbleR:%3u\n",
-    millis(), pressed.c_str(),
+    "[%lums] Mode:%s Btns:%-40s LT:%3u RT:%3u LX:%6d LY:%6d RX:%6d RY:%6d | ok:%lu bad:%lu USBEnumerated:%s BLEConnected:%s RumbleL:%3u RumbleR:%3u\n",
+    millis(), (g_activeModeIndex == MODE_WIRELESS) ? "Wireless(BLE)" : "Wired(XInput)", pressed,
     g_lastState.leftTrigger, g_lastState.rightTrigger,
     g_lastState.leftX, g_lastState.leftY, g_lastState.rightX, g_lastState.rightY,
     g_packetsOk, g_packetsBad,
-    everEnumerated ? "yes" : "no",
+    ESP32XInput.ready() ? "yes" : "no",
+    bleConnected() ? "yes" : "no",
     g_rumbleLeft, g_rumbleRight
   );
 }
 
 void setup() {
   Serial.begin(BAUD_RATE);
-  // Give the host side a moment before we start printing, purely cosmetic for the monitor.
-  delay(200);
+  delay(200);  // cosmetic: give a serial monitor a moment before we start printing
   Serial.println("=== EverLink Relay ===");
   Serial.printf("Waiting for packets at %lu baud...\n", BAUD_RATE);
 
   ESP32XInput.begin(XINPUT_VID, XINPUT_PID);
-  ESP32XInput.setPollInterval(XINPUT_POLL_INTERVAL_MS); // 4ms = 250Hz, matching the EverLink packet rate
-  ESP32XInput.releaseAll(); // start from a fully-released controller state, not whatever garbage memory held before
-
-  // Registers onRumbleReceived() as the function ESP32XInput calls whenever the console's
-  // rumble command changes - this is the library's actual rumble API (see
-  // onRumbleReceived's doc comment above for why the previous getLastRumbleLeft()/
-  // getLastRumbleRight()-based approach was wrong). Must be registered before pollRumble()
-  // is ever called in loop() for the very first rumble command to be caught, though in
-  // practice a console typically doesn't send one until well after enumeration, so this
-  // ordering only matters for correctness/clarity, not to avoid a real race in this
-  // firmware's startup sequence.
+  ESP32XInput.setPollInterval(XINPUT_POLL_INTERVAL_MS);
+  ESP32XInput.releaseAll();  // start fully released, not whatever memory held
   ESP32XInput.onRumble(onRumbleReceived);
-
   Serial.println("USB XInput controller initialized.");
+
+  // BLE is deliberately NOT started here - see BLE_ALWAYS_RESIDENT_NOTE. setActiveMode()
+  // just sets the starting mode and sends the initial MODE: line; Host doesn't strictly
+  // need it (the next ident reply says which mode is active) but it saves a rescan if
+  // Host is already watching this port.
+  setActiveMode(MODE_WIRED);
 }
 
 void loop() {
-  // Check for an identification ping first, each iteration - it's a single distinct byte
-  // (0xFE) that would otherwise confuse the packet parser if left for it to find. Real
-  // packets always start with 0xA5, so there's no ambiguity between the two.
-  tryHandlePing();
+  // Pings, mode switches and data packets, in whatever order they arrived.
+  const bool gotPacket = processSerialInput();
 
-  // Drain as many complete packets as are currently available each loop iteration -
-  // keeps g_lastState fresh even if loop() gets called less often than packets arrive.
-  bool gotPacket = false;
-  while (tryReadPacket()) {
-    gotPacket = true;
+  // Only the ACTIVE mode's machinery runs. A started BLE stack stays resident, but the
+  // inactive transport is never fed input, polled, or allowed to advertise.
+  if (g_activeModeIndex == MODE_WIRELESS) {
+    serviceBleReport();         // rate-limited, change-only BLE HID report
+    sendPairStatusIfChanged();  // connected / disconnected / searching -> Host
+  } else {
+    if (gotPacket) updateUsbState();
+    ESP32XInput.pollRumble();   // services console rumble/LED packets; invokes onRumbleReceived()
+    sendRumbleIfChanged();      // must run after pollRumble()
+    enforceBleOffWhileWired();  // keep Bluetooth silent
   }
 
-  // Only push to USB once per drained batch - the newest state is all that matters for
-  // what the console actually sees, no point re-sending for every intermediate packet.
-  if (gotPacket) {
-    updateUsbState();
-  }
-
-  // Services pending rumble/LED OUT-endpoint packets from the console, draining and
-  // dispatching them - this is what actually invokes onRumbleReceived() (registered in
-  // setup()) whenever the console's rumble command changes. Nothing is read back from
-  // ESP32XInput after this call; onRumbleReceived() already wrote whatever changed into
-  // g_rumbleLeft/g_rumbleRight/g_rumbleChangedSinceSent as a side effect of this call.
-  ESP32XInput.pollRumble();
-
-  // Forward the rumble state to Host, but only if onRumbleReceived() actually set
-  // g_rumbleChangedSinceSent during the pollRumble() call just above (new in v2 - see
-  // EverLink_Protocol.md's "Rumble" section). Must run after pollRumble(): that's the
-  // only place g_rumbleChangedSinceSent ever gets set.
-  sendRumbleIfChanged();
-
-  uint32_t now = millis();
+  const uint32_t now = millis();
   if (now - g_lastSummaryMs >= SUMMARY_INTERVAL_MS) {
     g_lastSummaryMs = now;
     printSummary();

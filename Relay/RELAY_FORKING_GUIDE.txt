@@ -1,0 +1,174 @@
+EVERLINK RELAY - FORKING GUIDE
+================================
+
+So you want to build your own Relay firmware - a different console/controller
+protocol, a different transport, whatever. This is the short version of what you
+actually need to change and why. The full wire format is in EverLink_Protocol.md;
+read that too, this doc just orients you.
+
+Start from Relay.ino - the reference firmware, which now has a real worked example of
+both a wired mode (XInput over USB) and a wireless mode (generic BLE HID) in one file,
+including real mode-switching and pairing-status reporting. There's no separate dummy/
+example sketch anymore - Relay.ino itself is the example to read.
+
+
+1. GIVE YOUR FIRMWARE A KIND
+-----------------------------
+This is the whole point of the Kind field: it's what makes your fork show up in
+EverLink Host's relay list as itself, not as an indistinguishable copy of the
+reference firmware.
+
+  static const char* RELAY_KIND = "Your Firmware Name Here";
+
+Guidelines:
+  - Name the protocol/console family you target ("Wii U Protocol Relay", "GameCube
+    Adapter Relay"), not the board and not the individual unit. The reference
+    firmware itself uses a deliberately generic Kind ("EverLink Relay") rather than
+    naming one specific protocol, because it speaks more than one (XInput over USB,
+    generic BLE HID) depending on which mode is active - if your fork also has modes
+    that speak genuinely different protocols, consider whether a generic Kind or a
+    specific one better represents it; there's no single right answer, just pick
+    whichever won't mislead someone who only sees Kind and not your Modes list.
+  - Keep it under ~32 characters - it's shown inline in a list row.
+  - No ':' , ',' or '|' characters - these are reserved by the wire format and will
+    corrupt the parse on Host's end.
+
+That's it for this step. Do it even if you change nothing else - it's how anyone
+using your fork (including yourself, running both at once) tells relays apart.
+
+
+2. DECLARE YOUR MODES
+-----------------------
+Every Relay has at least one mode. A mode is a named operating state that's either
+wired or wireless - that classification is what Host uses to decide whether to show
+a mode picker, a "Trigger Pairing" button, or nothing.
+
+  static const char* RELAY_MODES = "Name|wired";                                   // one mode
+  static const char* RELAY_MODES = "Wired (XInput)|wired,Wireless (BLE)|wireless";  // two modes - what the reference firmware actually sends
+
+Rules:
+  - Comma-separated entries, each "Name|wired" or "Name|wireless" - no other value
+    for the second field is recognized.
+  - Keep the list in a FIXED order: a mode's position is the index Host sends in the
+    mode-switch command. Which mode is active right now goes in the ident reply's
+    trailing activeMode field (its index) - never in list order. Make sure that field
+    reflects reality when you answer the ping (e.g. if you remember the last mode from
+    flash, or Host rescans while you're in your wireless mode).
+  - If you only have one mode, you don't need to implement the mode-switch command
+    at all (see step 3) - Host never sends it to a Relay whose ident reply lists a
+    single mode.
+  - Name field follows the same character restrictions as Kind (no ':' ',' '|').
+  - Name the actual protocol each mode speaks, not a vague category - "Wired
+    (XInput)" and "Wireless (BLE)", not just "Wired" and "Wireless". This matters
+    more than it sounds like it should: a generic "Wireless" mode name on a BLE
+    firmware could easily be misread as "this behaves like a real Xbox Wireless
+    controller", which no BLE firmware can (see step 4's note on this exact
+    confusion) - naming the actual transport heads that off before someone flashes
+    your firmware expecting console compatibility it structurally cannot have.
+
+
+3. HANDLE THE MODE-SWITCH COMMAND (only if you have >1 mode)
+---------------------------------------------------------------
+Host sends two bytes: 0xFD followed by a uint8 mode index (0-based, into the list
+you sent in your ident reply). Read both bytes, validate the index, and if it's
+valid:
+
+  a) Update whatever internal state tracks your "current mode".
+  b) If the mode you just switched TO is wireless, treat this as a fresh
+     "begin pairing" request - see step 4. This applies EVEN IF the requested index
+     is the mode you were already in. That's not a bug in Host, it's intentional:
+     there's no separate "start pairing" command in the protocol. Asking a wireless
+     mode to activate IS how pairing gets triggered, whether or not it was already
+     active.
+  c) Reply with "MODE:<index>\n" (the index you actually ended up in - normally,
+     but not necessarily, the one requested).
+
+If the requested index is out of range, do nothing - no reply at all. Host doesn't
+treat a missing acknowledgement as an error, it just won't reflect a mode change it
+never asked you to reject anyway.
+
+See Relay.ino's processSerialInput()/handleModeSwitch()/setActiveMode() for a real
+two-mode implementation: setActiveMode() is where the actual dispatch on the requested
+index happens (starting/stopping BLE advertising, switching which output function
+loop() calls each iteration), handleModeSwitch() just reads and validates the index
+byte, and processSerialInput() is the single place that looks at each incoming lead
+byte (ping 0xFE, mode switch 0xFD, data packet 0xA5) and routes it. Keep that
+single-dispatcher shape if you add commands of your own: a separate parser per command
+lets one parser mistake another's bytes for garbage and discard them.
+
+
+4. WHAT "PAIRING" ACTUALLY MEANS HERE
+----------------------------------------
+EverLink's protocol deliberately does NOT know anything about how your wireless
+mode pairs - BLE, a proprietary 2.4GHz dongle, whatever. All Host knows is "this
+mode is wireless" (from your Modes list) and "ask it to activate" (the mode-switch
+command). What you DO when your wireless mode activates is entirely up to you: open
+a BLE advertising window (what the reference firmware does - see
+setActiveMode(MODE_WIRELESS) in Relay.ino), pair over some other radio, whatever
+your actual pairing flow needs.
+
+Report your pairing/connection status to Host as PAIR: lines - see
+EverLink_Protocol.md section 6. There are exactly four states: idle, searching,
+connected, disconnected (the other side dropped or unpaired you). NOTABLY, THERE IS NO DEVICE-IDENTITY FIELD - a `PAIR:connected` line
+means only that something is connected, not what. This isn't a corner Host cut for
+simplicity: most wireless transports genuinely don't let a peripheral (which is what
+your Relay is, from the connecting device's point of view) read back the connecting
+side's friendly name - confirmed for BLE specifically while building the reference
+firmware's wireless mode (a peripheral gets the connecting central's Bluetooth
+address, never its name, from anything in the standard connection-info API). If your
+transport genuinely can report a real peer identity, that would need to be a
+separate, additive protocol extension (see step 5) - not something to fake here with
+a placeholder string.
+
+One important behavioral detail Host relies on: (re-)activating a wireless mode via
+the mode-switch command IS how pairing gets (re-)triggered - there's no separate
+"start pairing" command. This applies EVEN IF the requested mode index is the one
+you were already in (see step 3's note on this too). Host's own Pair button just
+re-sends the currently-active mode's index for exactly this reason. Your
+setActiveMode()-equivalent should send `PAIR:searching` immediately whenever a
+wireless mode is (re-)activated this way - see Relay.ino's setActiveMode() for how
+the reference firmware does this, including force-disconnecting an existing
+connection first if this was a re-pair request while already connected (advertising
+generally won't accept a new connection on top of an existing one).
+
+Also worth knowing before you build against a specific BLE gamepad library: as of
+this firmware being written, lemmingDev/ESP32-BLE-Gamepad's real XInput emulation
+mode (the kind Windows would bind its native Xbox driver to) lived only on an
+unreleased, unmerged feature branch - the reference firmware uses that library's
+stable, released, generic-BLE-HID mode instead, which works fine for real input but
+is recognized as a normal Bluetooth gamepad, not specifically as an "Xbox
+controller". Check the library's current release state before assuming XInput-over-
+BLE is available - and regardless of which BLE HID mode you use, no BLE firmware of
+any kind can ever be recognized by an actual Xbox console: Xbox consoles have no
+Bluetooth radio at all, full stop, so a wireless mode built on BLE is inherently
+PC/phone-only. See Relay.ino's BLE_XBOX_CONSOLE_NOTE for the detail on this.
+
+
+5. VERSION YOUR PROTOCOL CHANGES, NOT JUST YOUR KIND
+--------------------------------------------------------
+Kind identifies WHICH firmware this is. Protocol version identifies WHAT WIRE
+FORMAT it speaks. These are independent: two different Kinds can both speak
+protocol v3 with no changes between them (this is the normal case - most forks
+should NOT need to touch PROTOCOL_VERSION at all, just RELAY_KIND/RELAY_MODES).
+
+Only bump PROTOCOL_VERSION if you're changing something Host itself needs to parse
+differently - a new field in the ident reply, a new command byte, a changed packet
+layout, or (relevant to step 4 above) something like a real connected-device
+identity field if your transport can actually supply one. If you do this, you're no
+longer really "forking the reference firmware", you're proposing a new protocol
+version - update EverLink_Protocol.md and get it merged upstream if you want other
+people's Host builds to understand it, or accept that only a Host build that's been
+taught your specific extension will support it fully (everyone else will just see
+it as "a newer version than I know about" per EverLink_Protocol.md section 1's
+forward-compatibility note, and use it as whatever the closest version they DO
+understand supports).
+
+
+THAT'S IT
+---------
+Steps 1-2 (Kind + Modes) are the only two things every fork should do. Step 3 only
+applies if you have more than one mode. Steps 4-5 are guidance for when you get
+there, not requirements for a basic fork. A minimal fork that just changes
+RELAY_KIND to identify itself, keeps a single "Wired (XInput)" mode (or whatever
+your one mode actually speaks), and changes nothing else about the packet handling
+is a completely valid, complete fork.

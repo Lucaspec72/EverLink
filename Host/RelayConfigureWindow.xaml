@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:EverLinkHost"
-        Title="EverLink - Configure" Height="480" Width="1100" MinHeight="380" MinWidth="800"
+        Title="EverLink - Configure" Height="530" Width="1100" MinHeight="420" MinWidth="800"
         Background="{DynamicResource BgWindow}">
     <Window.Resources>
         <ResourceDictionary Source="Theme.xaml"/>
@@ -11,14 +11,60 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
         <TextBlock x:Name="HeaderText" Grid.Row="0" Text="" Margin="2,0,0,8"
                    FontWeight="SemiBold" FontSize="14" Foreground="{StaticResource TextPrimary}"/>
 
+        <!-- Relay info box: full width, sits above Controller/Presets so it doesn't
+             disturb that row's existing 50/50 layout. Shows this Relay's Mode list as a
+             row of toggle-style buttons (v3+, see EverLink_Protocol.md section 5) -
+             click one to switch to it, same interaction pattern as the remap grid's
+             Detect buttons below (click = select/act, current state shown by the
+             button's own visual state rather than a separate label). Pair sits at the
+             far right of the same box, enabled whenever the ACTIVE mode is wireless
+             (regardless of how many modes there are), its own label reflecting live
+             pairing status (Idle/Searching/Connected - see EverLink_Protocol.md
+             section 6) rather than always reading "Trigger Pairing" - see
+             RelayConfigureWindow.xaml.cs's InitializeRelayInfoBox/RefreshModeDisplay.
+             ConnectedDeviceText, just left of Pair, shows a plain "Connected" indicator
+             while PairingState is Connected - there's no device NAME available to show
+             (see EverLink_Protocol.md section 6), just whether something's connected. A
+             pre-v3 Relay has exactly one implied "Wired" mode (see
+             DeviceInfo.EffectiveModes) so it gets one always-selected, non-wireless mode
+             button and no Pair button/connected indicator - nothing looks broken or
+             missing for it, it's just genuinely a wired-only relay. Kind now lives in
+             the window title instead of here (see the constructor) - this box is
+             Mode/Pair/status only. -->
+        <Border Grid.Row="1" Background="{StaticResource BgControl}" CornerRadius="4" Padding="8" Margin="0,0,0,10">
+            <DockPanel LastChildFill="True">
+                <TextBlock Text="Mode" DockPanel.Dock="Left" VerticalAlignment="Center" FontSize="10"
+                           FontWeight="SemiBold" Foreground="{StaticResource TextMuted}" Margin="0,0,10,0"/>
+
+                <!-- Docked right so Pair (and, when connected, the connected indicator)
+                     always sit at the box's far right edge, regardless of how many mode
+                     buttons ModeButtonsPanel ends up holding. Order here matters for
+                     DockPanel: each Dock="Right" child stacks further left than the
+                     previous one, so PairButton (docked first) ends up rightmost and
+                     ConnectedDeviceText sits just to its left. -->
+                <Button x:Name="PairButton" DockPanel.Dock="Right" Content="Trigger Pairing" Padding="10,4"
+                        VerticalAlignment="Center" Margin="10,0,0,0" Click="PairButton_Click"/>
+                <TextBlock x:Name="ConnectedDeviceText" DockPanel.Dock="Right" VerticalAlignment="Center"
+                           FontSize="11" Foreground="{StaticResource TextMuted}" Margin="10,0,0,0"/>
+
+                <!-- Populated in code-behind (InitializeRelayInfoBox) - one toggle-style
+                     Button per Mode, not a data-bound ItemsControl, since each button
+                     needs its own individually-updated selected/unselected visual state
+                     (see RefreshModeDisplay) rather than a template driven purely by
+                     binding. -->
+                <StackPanel x:Name="ModeButtonsPanel" Orientation="Horizontal" VerticalAlignment="Center"/>
+            </DockPanel>
+        </Border>
+
         <!-- Top layer: controller selector (left half) + presets (right half), 50/50. -->
-        <Grid Grid.Row="1" Margin="0,0,0,10">
+        <Grid Grid.Row="2" Margin="0,0,0,10">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="*"/>
@@ -78,7 +124,7 @@
              the physical press and the button that's about to catch it are side by side;
              Remapped Output sits furthest right since it's the "final result" panel, read
              after the remap grid rather than interrupting the flow between Raw and Remap. -->
-        <Grid Grid.Row="2">
+        <Grid Grid.Row="3">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="1*"/>
                 <ColumnDefinition Width="2*"/>

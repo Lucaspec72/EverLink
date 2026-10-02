@@ -40,8 +40,13 @@ public partial class RelayConfigureWindow : Window
         _relayRow = relayRow;
         _mainWindow = mainWindow;
 
+        // Title is finalized in InitializeRelayInfoBox (name/nickname, then Kind) -
+        // this initial assignment is just a safe default in case that method were ever
+        // skipped, and gives HeaderText something sensible immediately either way.
         Title = $"EverLink - Configure ({relayRow.DeviceLabel})";
         HeaderText.Text = relayRow.DeviceLabel;
+
+        InitializeRelayInfoBox();
 
         // Subscribed directly (not routed through MainWindow) so the dropdown refreshes
         // immediately when a controller is plugged in or removed while this window is
@@ -86,6 +91,151 @@ public partial class RelayConfigureWindow : Window
 
     private void OnGamepadHotplugChanged(uint instanceId) => PopulateControllerDropdown();
 
+    // ---------- Relay info (Mode buttons + Pair, v3+ - see EverLink_Protocol.md sections 4-5) ----------
+
+    private static readonly Brush ModeSelectedBackground = new SolidColorBrush(Color.FromRgb(0x4C, 0xAF, 0x50));
+    private static readonly Brush ModeUnselectedBackground = Brushes.Transparent;
+
+    // One entry per mode button currently shown, in the same order as
+    // DeviceInfo.EffectiveModes - built once in InitializeRelayInfoBox and repainted by
+    // RefreshModeDisplay to reflect whichever one is currently active. Kept as a plain
+    // list (rather than looked up via ItemContainerGenerator, the way the data-bound
+    // remap grid does) because ModeButtonsPanel's children are built directly in
+    // code-behind, not from a DataTemplate.
+    private readonly List<Button> _modeButtons = new();
+
+    /// <summary>One-time setup, called once from the constructor: puts this Relay's Kind
+    /// into the window title (after the name/nickname - see EverLink_Protocol.md
+    /// section 4) and builds one toggle-style button per Mode into ModeButtonsPanel. The
+    /// SET of mode buttons doesn't change after this - a Relay's Mode list is fixed as
+    /// of its ident reply - only which one is painted as selected, and whether Pair is
+    /// visible, changes later via RefreshModeDisplay (called once at the end of this
+    /// method, and repeatedly from Tick()).</summary>
+    private void InitializeRelayInfoBox()
+    {
+        var device = _relayRow.Relay.Device;
+        Title = $"EverLink - Configure ({_relayRow.DeviceLabel} \u2014 {device.DisplayKind})";
+
+        ModeButtonsPanel.Children.Clear();
+        _modeButtons.Clear();
+
+        var modes = device.EffectiveModes;
+        for (int i = 0; i < modes.Count; i++)
+        {
+            var index = i; // captured per-button - a loop variable captured by reference would have every button close over the same final value
+            var button = new Button
+            {
+                Content = modes[i].Name,
+                Padding = new Thickness(10, 4, 10, 4),
+                Margin = new Thickness(i == 0 ? 0 : 6, 0, 0, 0),
+            };
+            button.Click += (_, _) => OnModeButtonClicked(index);
+            ModeButtonsPanel.Children.Add(button);
+            _modeButtons.Add(button);
+        }
+
+        RefreshModeDisplay();
+    }
+
+    /// <summary>Repaints the mode buttons' selected/unselected background, Pair's own
+    /// label/enabled state, and the connected indicator, all to reflect the Relay's
+    /// actual current mode and pairing status. Called once from InitializeRelayInfoBox
+    /// and repeatedly from Tick(), since ActiveModeIndex/PairingState can each change at
+    /// any time as MODE:/PAIR: lines arrive asynchronously (see
+    /// SerialLink.ModeAcknowledged/PairingStatusChanged, kept in sync onto
+    /// RelayConnection.Device by RelayConnection.WireModeSync) - polling it here on
+    /// every Tick is simpler than wiring dedicated events all the way into this window
+    /// for what's a cheap check done at the same 50ms cadence the rest of this window
+    /// already refreshes at.
+    ///
+    /// Pair's visibility is keyed off the ACTIVE mode being wireless, not off mode
+    /// count - a Relay with two modes where the active one happens to be wireless still
+    /// gets a Pair button sitting right there alongside the mode buttons, not just a
+    /// single-mode wireless Relay. While visible, Pair's own label/enabled state tracks
+    /// PairingState directly (see EverLink_Protocol.md section 6) rather than always
+    /// reading a static "Trigger Pairing": Idle -> enabled, reads "Trigger Pairing";
+    /// Searching -> disabled (no re-triggering mid-search - see PairButton_Click's own
+    /// note on why re-sending during Searching isn't useful anyway), reads "Searching…";
+    /// Connected -> enabled, reads "Re-pair" (clicking it while connected is a
+    /// deliberate, valid way to search for a different device - see
+    /// EverLink_Protocol.md's note on this). ConnectedDeviceText shows a plain Connected/Disconnected indicator - there is no connected
+    /// device NAME to show (see EverLink_Protocol.md section 6: a wireless peripheral
+    /// generally can't learn the connected side's identity), so this deliberately marks
+    /// only that something is connected, not what.</summary>
+    private void RefreshModeDisplay()
+    {
+        var device = _relayRow.Relay.Device;
+        var modes = device.EffectiveModes;
+        var activeIndex = Math.Clamp(device.ActiveModeIndex, 0, modes.Count - 1);
+
+        for (int i = 0; i < _modeButtons.Count; i++)
+            _modeButtons[i].Background = i == activeIndex ? ModeSelectedBackground : ModeUnselectedBackground;
+
+        if (!device.ActiveMode.IsWireless)
+        {
+            PairButton.Visibility = Visibility.Collapsed;
+            ConnectedDeviceText.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        PairButton.Visibility = Visibility.Visible;
+        PairButton.IsEnabled = device.PairingState != PairingState.Searching;
+        PairButton.Content = device.PairingState switch
+        {
+            PairingState.Idle => "Trigger Pairing",
+            PairingState.Searching => "Searching\u2026",
+            PairingState.Connected => "Re-pair",
+            _ => "Trigger Pairing",
+        };
+
+        // Connected -> "\u25CF Connected". Disconnected (the other side dropped/unpaired us)
+        // -> "\u25CB Disconnected". Idle/Searching have nothing extra to say - the Pair button's
+        // own label already covers them.
+        switch (device.PairingState)
+        {
+            case PairingState.Connected:
+                ConnectedDeviceText.Text = "\u25CF Connected";
+                ConnectedDeviceText.Visibility = Visibility.Visible;
+                break;
+            case PairingState.Disconnected:
+                ConnectedDeviceText.Text = "\u25CB Disconnected";
+                ConnectedDeviceText.Visibility = Visibility.Visible;
+                break;
+            default:
+                ConnectedDeviceText.Visibility = Visibility.Collapsed;
+                break;
+        }
+    }
+
+    /// <summary>A mode button was clicked - sends the switch request for that button's
+    /// index immediately. Deliberately NOT repainting anything here: the Relay hasn't
+    /// actually confirmed the switch yet, and optimistically highlighting the clicked
+    /// button before that would misrepresent a request that could still fail/time out
+    /// (a disconnected Relay, an index it rejects) - RefreshModeDisplay (via Tick) is
+    /// what reflects the real state once (if) a MODE: line actually arrives. Clicking
+    /// the already-active mode's button is allowed and sent the same as any other -
+    /// for a wireless mode this is a valid way to re-trigger it, same as Pair.</summary>
+    private void OnModeButtonClicked(int modeIndex)
+    {
+        _mainWindow.RelayManager.SwitchMode(_relayRow.Relay.Device.Mac, modeIndex);
+    }
+
+    /// <summary>Pair - only visible while the Relay's active mode is wireless, and
+    /// disabled (so this handler can't even fire) while PairingState is Searching - see
+    /// RefreshModeDisplay. Re-requests that same active mode's index, which is what
+    /// actually (re-)triggers pairing on real wireless firmware - see
+    /// EverLink_Protocol.md's note on this and Relay.ino's BLE wireless mode for a
+    /// worked example. Not a distinct command from a mode-switch - this button and
+    /// clicking that mode's own button do exactly the same thing, Pair just stays
+    /// reachable at a fixed position regardless of which mode button currently
+    /// represents "wireless", and additionally surfaces live pairing status via its own
+    /// label (see RefreshModeDisplay) which the mode buttons don't.</summary>
+    private void PairButton_Click(object sender, RoutedEventArgs e)
+    {
+        var device = _relayRow.Relay.Device;
+        _mainWindow.RelayManager.SwitchMode(device.Mac, device.ActiveModeIndex);
+    }
+
     // ---------- Controller selection ----------
 
     private void PopulateControllerDropdown()
@@ -126,6 +276,8 @@ public partial class RelayConfigureWindow : Window
 
     private void Tick()
     {
+        RefreshModeDisplay();
+
         var reader = _previewController;
         if (reader is null)
         {

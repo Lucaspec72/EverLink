@@ -66,6 +66,45 @@ public class RelayRow : INotifyPropertyChanged
 
     public string ControllerLabel => Relay.Controller?.Name ?? "No controller assigned";
 
+    /// <summary>This Relay's firmware Kind (v3+, see EverLink_Protocol.md section 4) -
+    /// shown as small subtext under the device name so different firmware forks are
+    /// visually distinguishable in the list, not just by nickname. Falls back to a
+    /// generic label via DeviceInfo.DisplayKind for pre-v3 firmware, so this is never
+    /// blank.</summary>
+    public string KindLabel => Relay.Device.DisplayKind;
+
+    /// <summary>Whether this Relay's ACTIVE mode is wireless - drives whether the pairing status
+    /// line is shown in the main list at all (see MainWindow.xaml).</summary>
+    public bool IsWirelessActive => Relay.Device.ActiveMode.IsWireless;
+
+    /// <summary>Short live pairing status, only non-empty while this Relay's active mode
+    /// is wireless (see EverLink_Protocol.md section 6) - appended onto the same subtext
+    /// line as KindLabel in the main list so a wireless Relay's connection state is
+    /// visible at a glance without opening Configure. Empty string (not a placeholder
+    /// like "Wired") for a wired-active Relay, since MainWindow.xaml's binding already
+    /// only shows this substring when it's non-empty - see the StringFormat note there.
+    /// No connected-device identity is shown (or available) here - see
+    /// EverLink_Protocol.md section 6 on why PAIR: carries no device name.</summary>
+    public string PairingStatusLabel
+    {
+        get
+        {
+            var device = Relay.Device;
+            if (!device.ActiveMode.IsWireless) return "";
+
+            return device.PairingState switch
+            {
+                // "Device ..." wording on purpose: this row's status column already uses plain
+                // "Connected"/"Disconnected" for the SERIAL link to the Relay, and two different
+                // meanings of the same word on one row would be confusing.
+                PairingState.Connected => "Device connected",
+                PairingState.Disconnected => "Device disconnected",
+                PairingState.Searching => "Searching for device\u2026",
+                _ => "Not paired",
+            };
+        }
+    }
+
     /// <summary>Host<->Relay connection status. Three states rather than a plain
     /// bool: a Relay can have its serial port open (OS-level handle valid) without the
     /// firmware actually responding (e.g. a bad cable, or the board is mid-reset) - that
@@ -142,6 +181,14 @@ public class RelayRow : INotifyPropertyChanged
 public partial class MainWindow : Window
 {
     private readonly RelayManager _relayManager = new();
+
+    /// <summary>Exposed so RelayConfigureWindow can send mode-switch requests (see
+    /// RelayManager.SwitchMode) without MainWindow needing to proxy every such call
+    /// through a matching wrapper method of its own - same reasoning as
+    /// ScannedControllers/ControllerRows below, which already do this for the shared
+    /// controller list.</summary>
+    public RelayManager RelayManager => _relayManager;
+
     private readonly List<RelayRow> _relayRows = new();
     private readonly AppSettings _settings = AppSettings.Load();
 

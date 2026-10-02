@@ -4,32 +4,56 @@ EVERLINK RELAY - BUILD INSTRUCTIONS
 WHAT THIS IS
 ------------
 The ESP32 firmware half of EverLink. Reads the packet protocol from EverLink
-Host over serial and re-emits it as a real USB Xbox 360/XInput controller,
-so the console sees a genuine gamepad plugged in.
+Host over serial and re-emits it in one of two modes (Host switches between them):
 
-This REQUIRES a native-USB-capable board - an S2, S3, or P4-family ESP32
+  - Wired (XInput): a real USB Xbox 360/XInput controller, so the console
+    sees a genuine gamepad plugged in. This is the default at boot.
+  - Wireless (BLE): a generic Bluetooth LE HID gamepad that a PC or phone can
+    pair with directly. NOT an Xbox controller over the air, and it can never
+    be seen by an actual Xbox console (consoles have no Bluetooth radio) - see
+    RELAY_FORKING_GUIDE.txt and the BLE_XBOX_CONSOLE_NOTE in the firmware.
+    Bluetooth is not started at all until Wireless mode is first selected.
+
+Wired mode REQUIRES a native-USB-capable board - an S2, S3, or P4-family ESP32
 (anything with a real USB OTG peripheral, not just a USB-serial bridge
-chip). Plain ESP32 and C3-family boards cannot run this firmware's USB
-output stage; Host's device list already flags this ("USB Output:
-Unsupported") for any board it detects as incapable.
+chip). Plain ESP32 and C3-family boards cannot run its USB output stage; Host's
+device list already flags this ("USB Output: Unsupported") for any board it
+detects as incapable. The firmware initializes the USB XInput stack at startup
+regardless of mode, so build it for a native-USB board even if you only plan to
+use Wireless; a Wireless-only build for boards without native USB is not
+supported by this firmware as written.
 
 It also responds to an identification ping (see ../EverLink_Protocol.md) so
 Host's device scan can recognize this board as a genuine EverLink Relay
 (rather than just any COM port), read its unique hardware MAC address for
-stable device naming, and check its chip model. This uses the SAME
-firmware binary across every board - no per-device editing needed, since
-both the identity and chip model come from the hardware/SDK itself, not
+stable device naming, check its chip model, and learn its Kind and Mode list.
+This uses the SAME firmware binary across every board - no per-device editing
+needed, since identity and chip model come from the hardware/SDK itself, not
 from anything written into the code.
 
-REQUIRED LIBRARY
------------------
+REQUIRED LIBRARIES
+-------------------
   ESP32XInput - provides the USB Xbox 360/XInput HID output. Install via
   Arduino IDE's Library Manager (search "ESP32XInput") or PlatformIO's
-  lib_deps. This firmware calls ESP32XInput.begin(), .setButton(),
-  .setHat(), .setLeftTrigger()/.setRightTrigger(), .setStickLeft()/
-  .setStickRight(), .send(), .pollRumble(), and .ready() - if you're on a
-  fork/version with a different API shape, the calls in "EverLink Relay.ino"
-  are the ones that need matching up.
+  lib_deps. This firmware calls ESP32XInput.begin(), .setPollInterval(),
+  .releaseAll(), .setButton(), .setHat(), .setLeftTrigger()/.setRightTrigger(),
+  .setStickLeft()/.setStickRight(), .send(), .onRumble(), .pollRumble(), and
+  .ready() - if you're on a fork/version with a different API shape, the calls
+  in "EverLink Relay.ino" are the ones that need matching up.
+
+  ESP32-BLE-Gamepad (lemmingDev) - provides the BLE HID output ("BleGamepad.h").
+  Install via Library Manager or lib_deps. The stable, released version is
+  what's used; the in-development BLE XInput branch is deliberately NOT used.
+  The firmware relies on BleGamepadConfiguration (axis ranges, Brake/
+  Accelerator, button/hat counts, model number), the per-axis setters
+  (setX/setY/setZ/setRZ/setRX/setRY), setHat1(), getPeerInfo() and
+  manual sendReport(), so use a release that has them.
+
+  NimBLE-Arduino - the BLE stack ESP32-BLE-Gamepad is built on; the firmware
+  also calls it directly (NimBLEDevice.h) to control advertising and
+  disconnect a peer. Install it alongside the gamepad library if your
+  library manager doesn't pull it in automatically. The code uses the 2.x API
+  (NimBLEConnInfo), so use NimBLE-Arduino 2.x.
 
 OPTION A: ARDUINO IDE (simplest to start with)
 -------------------------------------------------
@@ -41,7 +65,8 @@ OPTION A: ARDUINO IDE (simplest to start with)
    - Tools > Board > Boards Manager > search "esp32" > install
      "esp32 by Espressif Systems"
 
-3. Install the ESP32XInput library (Library Manager, see above).
+3. Install the ESP32XInput, ESP32-BLE-Gamepad and NimBLE-Arduino libraries
+   (Library Manager, see REQUIRED LIBRARIES above).
 
 4. Open "EverLink Relay.ino" in the Arduino IDE
 
@@ -58,3 +83,12 @@ OPTION A: ARDUINO IDE (simplest to start with)
    - Some S2/S3 boards need the cable plugged into the USB-OTG/native
      port specifically for upload, not a separate USB-UART port - check
      your board's silkscreen/documentation if upload doesn't work
+
+USING IT
+--------
+Wired mode needs nothing beyond plugging the board's native USB port into the
+console/PC. For Wireless, switch the Relay to Wireless mode from EverLink Host;
+the board starts advertising as "EverLink Relay (XXXX)" (XXXX = last 4 hex
+digits of its MAC) and Host's Pair button restarts pairing. Pair it from the
+PC/phone's normal Bluetooth settings. Switching back to Wired disconnects the
+peer and stops advertising.

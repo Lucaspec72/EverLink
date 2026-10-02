@@ -7,6 +7,7 @@ public partial class App : Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+
         // Initialize SDL once for the whole app's lifetime here rather than lazily in
         // MainWindow, so startup failures (e.g. SDL3.dll missing) surface immediately with
         // a clear message instead of showing up confusingly later during a rescan.

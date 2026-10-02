@@ -9,10 +9,50 @@ public record PortInfo(string PortName, string FriendlyName)
     public override string ToString() => FriendlyName;
 }
 
+/// <summary>A wireless mode's pairing/connection status, as reported by a v3+ Relay's
+/// unsolicited PAIR: line - see EverLink_Protocol.md section 6. Meaningless while the
+/// active mode is wired; DeviceInfo.PairingState only reflects this for real once the
+/// active mode is actually wireless.</summary>
+public enum PairingState
+{
+    Idle,
+    Searching,
+    Connected,
+    /// <summary>Was connected, and the other side dropped/unpaired the link. Distinct from
+    /// Idle so the UI can say so rather than looking like nothing ever happened.</summary>
+    Disconnected,
+}
+
+/// <summary>One mode a Relay advertises in its ident reply (v3+, see
+/// EverLink_Protocol.md section 5) - a named operating mode that's either wired or
+/// wireless. Exactly one of a Relay's modes is active at a time (see
+/// DeviceInfo.ActiveModeIndex); IsWireless is what drives whether Host shows a Pair
+/// button/mode picker for a given Relay at all.</summary>
+public record RelayMode(string Name, bool IsWireless)
+{
+    // Overridden so this displays cleanly wherever it's bound directly as a ComboBox
+    // item (see RelayConfigureWindow's ModeComboBox, which has no ItemTemplate) -
+    // records' default ToString() prints every property name/value, which isn't
+    // something to show someone picking a mode from a dropdown.
+    public override string ToString() => Name;
+}
+
 /// <summary>A confirmed EverLink Relay device: the COM port it's currently on, its
-/// stable hardware identity (MAC address), its chip model, and the protocol version its
-/// firmware reports - all obtained via the identification ping.</summary>
-public record DeviceInfo(string PortName, string FriendlyName, string Mac, string ChipModel, int ProtocolVersion)
+/// stable hardware identity (MAC address), its chip model, the protocol version its
+/// firmware reports, and (v3+) its firmware Kind, Mode list, and (for a wireless active
+/// mode) live pairing status - all obtained via the identification ping plus, for
+/// pairing status, subsequent unsolicited PAIR: lines (see EverLink_Protocol.md
+/// section 6).</summary>
+public record DeviceInfo(
+    string PortName,
+    string FriendlyName,
+    string Mac,
+    string ChipModel,
+    int ProtocolVersion,
+    string? Kind = null,
+    IReadOnlyList<RelayMode>? Modes = null,
+    int ActiveModeIndex = 0,
+    PairingState PairingState = PairingState.Idle)
 {
     /// <summary>The highest protocol version this build of Host actually knows about -
     /// i.e. the version EverLink_Protocol.md currently documents and KnownFeatures below
@@ -23,7 +63,51 @@ public record DeviceInfo(string PortName, string FriendlyName, string Mac, strin
     /// Host can keep functioning as far as it understands, it just can't know about or use
     /// whatever a newer Relay might additionally offer. Bump this when Host is actually
     /// updated to understand a new protocol version's feature(s) - see KnownFeatures.</summary>
-    public const int HighestKnownProtocolVersion = 2;
+    public const int HighestKnownProtocolVersion = 3;
+
+    /// <summary>Display-friendly firmware identifier - see EverLink_Protocol.md section
+    /// 4. Falls back to a generic label for v1/v2 firmware (which never sends a Kind at
+    /// all) or a v3+ firmware that, unusually, omits it - Host always has SOMETHING to
+    /// show here rather than a blank field.</summary>
+    public string DisplayKind => string.IsNullOrWhiteSpace(Kind) ? "EverLink Relay" : Kind;
+
+    /// <summary>This Relay's advertised modes - see EverLink_Protocol.md section 5.
+    /// Never null/empty in practice: a v1/v2 Relay (or a v3 Relay that somehow sends no
+    /// Modes field) is given a single implied "Wired" mode here rather than an empty
+    /// list, so every Relay has a well-defined ActiveMode and UI code never needs a
+    /// separate "no modes at all" case.</summary>
+    public IReadOnlyList<RelayMode> EffectiveModes => Modes is { Count: > 0 } ? Modes : ImpliedSingleWiredMode;
+
+    private static readonly IReadOnlyList<RelayMode> ImpliedSingleWiredMode = new[] { new RelayMode("Wired", IsWireless: false) };
+
+    /// <summary>The currently active mode, clamped to a valid index - defensive against
+    /// a malformed/out-of-range ActiveModeIndex rather than throwing, since this is
+    /// parsed from a physical device's wire reply and shouldn't be able to crash the UI
+    /// binding that reads it.</summary>
+    public RelayMode ActiveMode
+    {
+        get
+        {
+            var modes = EffectiveModes;
+            var index = Math.Clamp(ActiveModeIndex, 0, modes.Count - 1);
+            return modes[index];
+        }
+    }
+
+    /// <summary>Whether this Relay currently has more than one mode to choose between -
+    /// drives whether Host shows a mode picker (as opposed to, for a single-mode Relay
+    /// whose one mode happens to be wireless, just a plain "Trigger Pairing" button with
+    /// nothing to pick between). See RelayConfigureWindow.</summary>
+    public bool HasMultipleModes => EffectiveModes.Count > 1;
+
+    /// <summary>Whether PairingState currently means anything - only true while the
+    /// active mode is wireless. A stale PairingState left over from a previously-active
+    /// wireless mode (e.g. right after switching to a wired mode, but before Host has
+    /// necessarily re-derived a fresh DeviceInfo - in practice this
+    /// shouldn't linger, since ModeAcknowledged-driven updates replace PairingState back
+    /// to Idle whenever the newly-active mode isn't wireless, see
+    /// RelayConnection.WireModeSync) is never something UI should show as live status.</summary>
+    public bool IsPairingStatusMeaningful => ActiveMode.IsWireless;
 
     /// <summary>Whether this specific chip model has the native USB OTG peripheral needed
     /// to output as a USB HID gamepad the console can see. Plain ESP32 and C3-family chips
@@ -76,6 +160,13 @@ public record DeviceInfo(string PortName, string FriendlyName, string Mac, strin
             MinProtocolVersion: 1,
             RequiresUsbOtg: true,
             MissingMessage: d => $"{d.ChipModel} does not have USB OTG, impossible to use wired bridge."),
+
+        // Not gating any single named feature here the way the two rows above do -
+        // "Kind unset" and "single implied mode" are already handled gracefully
+        // elsewhere (DisplayKind, EffectiveModes) without needing a user-facing warning.
+        // A pre-v3 Relay simply won't offer a mode picker or Pair button at all, which is
+        // self-explanatory from the UI (nothing missing is shown) rather than something
+        // that needs its own compatibility note.
     };
 
     /// <summary>Whether this Relay's firmware speaks protocol v2 or later - the version
@@ -148,6 +239,10 @@ public static class PacketProtocol
 {
     public const byte SyncByte = 0xA5;
     public const int PacketSize = 14; // sync(1) + buttons(2) + LT(1) + RT(1) + LX,LY,RX,RY(2 each=8) + checksum(1)
+
+    /// <summary>Host -> Relay mode-switch command prefix byte (v3+, see
+    /// EverLink_Protocol.md section 5) - followed by a single uint8 mode index.</summary>
+    public const byte ModeSwitchByte = 0xFD;
 
     public static byte[] Encode(in ControllerState s)
     {
@@ -294,6 +389,31 @@ public class SerialLink : IDisposable
         }
     }
 
+    /// <summary>Sends a mode-switch request (see EverLink_Protocol.md section 5) asking
+    /// the Relay to (re-)activate the mode at the given index in its advertised Modes
+    /// list. Fire-and-forget from the caller's point of view - the actual confirmation,
+    /// if any, arrives later as a MODE: line (see ModeAcknowledged) rather than being
+    /// awaited here; a Relay that doesn't understand the command or rejects the index
+    /// simply never sends one back. Safe to call for re-activating the mode that's
+    /// already active - see the protocol doc's note that this IS how Host triggers
+    /// pairing on a wireless mode, not just how it switches between different modes.
+    /// Returns false without writing anything if the port isn't currently open.</summary>
+    public bool SwitchMode(int modeIndex)
+    {
+        if (!_port.IsOpen || modeIndex < 0 || modeIndex > byte.MaxValue) return false;
+
+        try
+        {
+            _port.Write(new byte[] { PacketProtocol.ModeSwitchByte, (byte)modeIndex }, 0, 2);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.Message;
+            return false;
+        }
+    }
+
     private void OnDataReceived(object sender, System.IO.Ports.SerialDataReceivedEventArgs e)
     {
         // Reads whatever raw bytes are currently available and splits them into lines
@@ -343,10 +463,42 @@ public class SerialLink : IDisposable
         }
     }
 
-    /// <summary>Prefix of the one line Host actually parses out of everything Relay sends -
+    /// <summary>Prefix of the rumble line Host parses out of everything Relay sends -
     /// see EverLink_Protocol.md's "Rumble" section. Only sent by v2+ firmware (never by
     /// v1), and only when the motor levels change.</summary>
     private const string RumblePrefix = "RMBL:";
+
+    /// <summary>Prefix of the mode-switch acknowledgement line - see
+    /// EverLink_Protocol.md section 5. Only sent by v3+ firmware, and only in reply to a
+    /// mode-switch command Host itself sent (see SwitchMode) - never spontaneously.</summary>
+    private const string ModeAckPrefix = "MODE:";
+
+    /// <summary>Prefix of the pairing status line - see EverLink_Protocol.md section 6.
+    /// Only sent by v3+ firmware with a wireless mode, and only unsolicited (Host never
+    /// asks for it) whenever that mode's pairing/connection status changes.</summary>
+    private const string PairPrefix = "PAIR:";
+
+    /// <summary>Set from the most recent MODE: acknowledgement line, if any - read by
+    /// RelayConnection/RelayRow to reflect the Relay's actual current mode in the UI
+    /// (rather than optimistically assuming a SwitchMode call succeeded the instant it's
+    /// sent). Null until the first acknowledgement arrives; from then on, holds the last
+    /// index the Relay itself confirmed.</summary>
+    public int? LastAcknowledgedModeIndex { get; private set; }
+
+    /// <summary>Raised whenever a MODE: acknowledgement line is parsed - lets
+    /// RelayConnection update the DeviceInfo it's tracking (an immutable record) without
+    /// SerialLink needing to know anything about RelayConnection/DeviceInfo itself.</summary>
+    public event Action<int>? ModeAcknowledged;
+
+    /// <summary>Raised whenever a well-formed PAIR: line is parsed (see
+    /// EverLink_Protocol.md section 6) - lets RelayConnection update the PairingState
+    /// it's tracking on DeviceInfo, same wiring pattern as ModeAcknowledged. Fires
+    /// regardless of what Host currently believes the active mode to be;
+    /// RelayConnection.WireModeSync is what applies the "only meaningful while active
+    /// mode is wireless" staleness rule described in EverLink_Protocol.md's "Host
+    /// behavior notes" - SerialLink itself has no opinion on which mode is active, only
+    /// DeviceInfo/RelayConnection track that.</summary>
+    public event Action<PairingState>? PairingStatusChanged;
 
     /// <summary>Marks a completed line's worth of bytes in _rxBuffer as received and clears
     /// the buffer for the next one. Called whenever a '\n' byte is seen in OnDataReceived.
@@ -374,6 +526,41 @@ public class SerialLink : IDisposable
 
         if (line.StartsWith(RumblePrefix, StringComparison.Ordinal))
             TryHandleRumbleLine(line.Substring(RumblePrefix.Length));
+        else if (line.StartsWith(ModeAckPrefix, StringComparison.Ordinal))
+            TryHandleModeAckLine(line.Substring(ModeAckPrefix.Length));
+        else if (line.StartsWith(PairPrefix, StringComparison.Ordinal))
+            TryHandlePairLine(line.Substring(PairPrefix.Length));
+    }
+
+    /// <summary>Parses a PAIR: line's payload ("<state>" - see EverLink_Protocol.md
+    /// section 6 - no device name; see that section for why not) and, if the state is
+    /// recognized, raises PairingStatusChanged. Malformed/unrecognized payloads are
+    /// silently ignored, same tolerant spirit as TryHandleModeAckLine/
+    /// TryHandleRumbleLine.</summary>
+    private void TryHandlePairLine(string payload)
+    {
+        PairingState? state = payload switch
+        {
+            "idle" => PairingState.Idle,
+            "searching" => PairingState.Searching,
+            "connected" => PairingState.Connected,
+            "disconnected" => PairingState.Disconnected,
+            _ => null,
+        };
+        if (state is null) return;
+
+        PairingStatusChanged?.Invoke(state.Value);
+    }
+
+    /// <summary>Parses a MODE: line's payload (a single decimal index) and, if valid,
+    /// records it and raises ModeAcknowledged. Malformed payloads are silently ignored -
+    /// same tolerant spirit as TryHandleRumbleLine.</summary>
+    private void TryHandleModeAckLine(string payload)
+    {
+        if (!int.TryParse(payload, out var index) || index < 0) return;
+
+        LastAcknowledgedModeIndex = index;
+        ModeAcknowledged?.Invoke(index);
     }
 
     /// <summary>Parses a rumble line's payload ("<left>:<right>", each 0-255 - see
@@ -582,7 +769,11 @@ public class SerialLink : IDisposable
             if (identity is not null)
             {
                 var friendly = friendlyNames.TryGetValue(portName, out var f) ? f : portName;
-                found.Add(new DeviceInfo(portName, friendly, identity.Value.Mac, identity.Value.ChipModel, identity.Value.ProtocolVersion));
+                found.Add(new DeviceInfo(
+                    portName, friendly, identity.Value.Mac, identity.Value.ChipModel, identity.Value.ProtocolVersion,
+                    Kind: identity.Value.Kind,
+                    Modes: identity.Value.Modes,
+                    ActiveModeIndex: identity.Value.ActiveModeIndex));
             }
         }
 
@@ -590,12 +781,13 @@ public class SerialLink : IDisposable
     }
 
     /// <summary>Opens the given port, sends the identification ping, and returns the
-    /// replying device's (ProtocolVersion, Mac, ChipModel) if it responds correctly within
-    /// the timeout - or null if the port couldn't be opened, didn't reply in time, or
-    /// replied with something unexpected (including an older firmware build that only
-    /// sends the MAC with no chip model suffix - treated as "unknown model" rather than a
-    /// parse failure).</summary>
-    private static (int ProtocolVersion, string Mac, string ChipModel)? TryPingDevice(string portName)
+    /// replying device's identity fields if it responds correctly within the timeout -
+    /// or null if the port couldn't be opened, didn't reply in time, or replied with
+    /// something unexpected (including an older firmware build that only sends the MAC
+    /// with no chip model suffix - treated as "unknown model" rather than a parse
+    /// failure, and pre-v3 firmware which sends no Kind/Modes at all - treated as null/
+    /// empty, see DeviceInfo.DisplayKind and EffectiveModes for how those are defaulted).</summary>
+    private static (int ProtocolVersion, string Mac, string ChipModel, string? Kind, IReadOnlyList<RelayMode> Modes, int ActiveModeIndex)? TryPingDevice(string portName)
     {
         try
         {
@@ -620,20 +812,22 @@ public class SerialLink : IDisposable
                 return null;
             }
 
-            // "<N>:<MAC>:<ChipModel>" where N is the protocol version digit(s) - e.g.
-            // "2:B0CBD8CCBEF0:ESP32". Split on ':' up to 3 parts so a MAC or chip model
-            // string couldn't accidentally shift the split (neither ever contains a colon
-            // in practice, but capping at 3 parts here costs nothing and avoids relying on
-            // that).
+            // "<N>:<MAC>:<ChipModel>[:<Kind>:<Modes>]" where N is the protocol version
+            // digit(s) - e.g. "3:B0CBD8CCBEF0:ESP32-S3:EverLink Relay:Wired (XInput)|wired".
+            // Split on ':' up to 6 parts: version, MAC, chip model, Kind, Modes, active mode index. A pre-v3
+            // reply simply has only the first 3 parts - see EverLink_Protocol.md section
+            // 1 for why the trailing fields are omitted entirely (not left blank) by
+            // older firmware. Kind/Modes strings themselves must not contain ':' (also
+            // documented there), so capping the split at 5 doesn't risk truncating them.
             var rest = line.Substring(IdentPrefix.Length);
-            var parts = rest.Split(':', 3);
+            var parts = rest.Split(':', 6);
 
             // A pre-v2 (v1) Relay's ident reply was "IAM:EverLink:v1:<MAC>:<ChipModel>" -
             // i.e. the "1" was baked into the old IdentPrefix constant itself, not a
             // separate field the way v2+ sends it. IdentPrefix now stops before that
             // digit, so a v1 reply's "rest" here starts with "1:<MAC>:<ChipModel>" - same
-            // shape as a v2+ reply's "<N>:<MAC>:<ChipModel>", just always "1". No special
-            // casing needed: the generic parse below handles both.
+            // shape as a v2+ reply's "<N>:<MAC>:<ChipModel>...", just always "1". No
+            // special casing needed: the generic parse below handles both.
             if (parts.Length < 2 || !int.TryParse(parts[0], out var version))
             {
                 return null; // not a recognizable ident reply at all
@@ -641,7 +835,14 @@ public class SerialLink : IDisposable
 
             var mac = parts[1];
             var chipModel = parts.Length > 2 ? parts[2] : "Unknown";
-            return (version, mac, chipModel);
+            var kind = parts.Length > 3 ? parts[3] : null;
+            var modes = parts.Length > 4 ? ParseModes(parts[4]) : Array.Empty<RelayMode>();
+            // Which mode is active is stated explicitly (v3): the mode LIST keeps a fixed order so
+            // indices stay stable for the mode-switch command, so it can't be read off list order.
+            // Missing/garbled -> 0 (the first mode), same as a Relay that never sent the field.
+            var activeModeIndex = parts.Length > 5 && int.TryParse(parts[5], out var parsedActive) && parsedActive >= 0 ? parsedActive : 0;
+
+            return (version, mac, chipModel, kind, modes, activeModeIndex);
         }
         catch
         {
@@ -649,6 +850,35 @@ public class SerialLink : IDisposable
             // for real callers: this port isn't a usable EverLink Relay device right now.
             return null;
         }
+    }
+
+    /// <summary>Parses a v3+ ident reply's Modes field - see EverLink_Protocol.md
+    /// section 5 for the exact format ("Name|wired" or "Name|wireless", comma-
+    /// separated, first entry = currently active). Malformed entries are dropped rather
+    /// than failing the whole parse - a firmware with one bad entry in an otherwise
+    /// valid Modes list shouldn't lose Kind/version/MAC recognition entirely over it, it
+    /// just won't offer whatever that one entry would have. Which mode is ACTIVE is NOT inferred from list order - it comes from the ident reply's separate active-mode field (see TryPingDevice).</summary>
+    private static IReadOnlyList<RelayMode> ParseModes(string field)
+    {
+        var modes = new List<RelayMode>();
+        foreach (var entry in field.Split(','))
+        {
+            var pipeParts = entry.Split('|', 2);
+            if (pipeParts.Length != 2) continue;
+
+            var name = pipeParts[0];
+            var isWireless = pipeParts[1] switch
+            {
+                "wireless" => true,
+                "wired" => false,
+                _ => (bool?)null,
+            };
+
+            if (string.IsNullOrWhiteSpace(name) || isWireless is null) continue;
+
+            modes.Add(new RelayMode(name, isWireless.Value));
+        }
+        return modes;
     }
 
     /// <summary>

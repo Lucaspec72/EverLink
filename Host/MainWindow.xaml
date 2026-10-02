@@ -41,7 +41,15 @@
                                          same visual pattern the old Used relay list used,
                                          plus the activity indicator. -->
                                     <StackPanel Grid.Column="0" VerticalAlignment="Center">
-                                        <TextBlock Text="{Binding DeviceLabel}" FontSize="13" Foreground="{StaticResource TextPrimary}"/>
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="{Binding DeviceLabel}" FontSize="13" Foreground="{StaticResource TextPrimary}"/>
+                                            <!-- Firmware Kind (v3+, see EverLink_Protocol.md section 4) - small
+                                                 subtext beside the name, not its own line, so rows already showing
+                                                 a generic "EverLink Relay" Kind (every pre-v3 Relay) don't visually
+                                                 grow taller than one that has a real Kind to show. -->
+                                            <TextBlock Text="{Binding KindLabel, StringFormat=' · {0}'}" FontSize="10"
+                                                       Foreground="{StaticResource TextMuted}" VerticalAlignment="Bottom" Margin="4,0,0,1"/>
+                                        </StackPanel>
                                         <StackPanel Orientation="Horizontal" Margin="0,1,0,0">
                                             <Ellipse Width="6" Height="6" Margin="0,0,5,0" VerticalAlignment="Center">
                                                 <Ellipse.Style>
@@ -57,6 +65,14 @@
                                             </Ellipse>
                                             <TextBlock Text="{Binding ControllerLabel}" FontSize="10" Foreground="{StaticResource TextMuted}"/>
                                         </StackPanel>
+                                        <!-- Live pairing status - only present while this Relay's ACTIVE mode is wireless
+                                             (see EverLink_Protocol.md section 6). Collapsed otherwise, so a wired
+                                             Relay's row is exactly as tall as before. Left margin 11 = the
+                                             activity dot above (6 wide + 5 margin), so this lines up under the
+                                             controller name instead of under the dot. -->
+                                        <TextBlock Text="{Binding PairingStatusLabel}" FontSize="10"
+                                                   Foreground="{StaticResource TextMuted}" Margin="11,1,0,0"
+                                                   Visibility="{Binding IsWirelessActive, Converter={StaticResource BoolToVisibilityConverter}}"/>
                                     </StackPanel>
 
                                     <!-- Connection status only now - the old second line
